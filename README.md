@@ -13,7 +13,8 @@ Creates Amazon CloudWatch alarms for an AWS Lambda function. The construct alarm
 
 - CloudWatch alarms on the Lambda `Errors` and `Throttles` metrics
 - Optional platform alarms for `DeadLetterErrors`, `DestinationDeliveryFailures`, and stream `IteratorAge`
-- Optional log-pattern metric filters and alarms (log group optional; managed with configurable retention, default one year)
+- Optional log-pattern metric filters and alarms
+- Optional log retention when the construct manages the Lambda log group (default one year)
 - Optional shared `alarmConfig` for threshold, period, evaluation periods, and missing-data handling
 - Optional notifications through an existing SNS topic
 - Opt-in helper that creates the construct only when failure detection is enabled
@@ -23,10 +24,11 @@ Creates Amazon CloudWatch alarms for an AWS Lambda function. The construct alarm
 1. You pass a Lambda function. A log group is needed only when you supply `logFilters`.
 2. The construct creates CloudWatch alarms on the `AWS/Lambda` `Errors` and `Throttles` metrics. By default, missing data does not breach, so a quiet schedule stays quiet between runs.
 3. When you enable entries in `platformMetrics`, the construct adds matching platform alarms (`DeadLetterErrors`, `DestinationDeliveryFailures`, and/or `IteratorAge`).
-4. For each log filter, the construct adds a metric filter and an alarm on the filter's sum. Pass `logGroup` to use an existing group, or omit it to manage `/aws/lambda/<functionName>` with `logRetention` (default one year).
-5. When you pass `alarmConfig`, failure sum alarms use those settings. IteratorAge uses the same period and evaluation settings, but its threshold comes from `platformMetrics.iteratorAgeThreshold` (default 60000 ms). When you omit `alarmConfig`, the defaults are threshold 1, period 5 minutes, evaluationPeriods 1, and treatMissingData `NOT_BREACHING`.
-6. When you pass an SNS topic, every alarm notifies that topic. When you omit the topic, the alarms remain and have no SNS action.
-7. `createLambdaFailureDetector` creates the construct only when failure detection is enabled.
+4. For each log filter, the construct adds a metric filter and an alarm on the filter's sum. Pass `logGroup` to use an existing group, or omit it to manage `/aws/lambda/<functionName>` with `logRetention` (default one year). Do not set both `logGroup` and `logRetention`.
+5. When you pass `alarmConfig`, failure sum alarms use those settings. Defaults are threshold 1, period 5 minutes, evaluationPeriods 1, and treatMissingData `NOT_BREACHING`.
+6. IteratorAge uses the same period and evaluation settings from `alarmConfig`, but its threshold comes from `platformMetrics.iteratorAgeThreshold` (default 60000 ms).
+7. When you pass an SNS topic, every alarm notifies that topic. When you omit the topic, the alarms remain and have no SNS action.
+8. `createLambdaFailureDetector` creates the construct only when failure detection is enabled.
 
 ## Installation
 
@@ -78,10 +80,12 @@ To alarm on a log line and notify an existing topic, pass `logFilters` and `alar
 ```ts
 import { Duration } from 'aws-cdk-lib';
 import * as cloudwatch from 'aws-cdk-lib/aws-cloudwatch';
+import * as lambda from 'aws-cdk-lib/aws-lambda';
 import * as logs from 'aws-cdk-lib/aws-logs';
 import * as sns from 'aws-cdk-lib/aws-sns';
 import { createLambdaFailureDetector } from 'lambda-failure-detector';
 
+declare const fn: lambda.IFunction;
 declare const topic: sns.ITopic;
 
 const detector = createLambdaFailureDetector(this, 'FailureDetector', {

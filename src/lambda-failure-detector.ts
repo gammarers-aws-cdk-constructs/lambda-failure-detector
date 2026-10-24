@@ -312,6 +312,7 @@ const resolveAlarmConfig = (config?: AlarmConfig): ResolvedAlarmConfig => ({
  * @param logRetention - Retention when the construct manages the log group.
  * @param logFilters - Log filters that require a log group.
  * @returns Log group for metric filters, or undefined when unused.
+ * @throws Error when both `logGroup` and `logRetention` are set.
  */
 const resolveLogGroupForFilters = (
   scope: Construct,
@@ -591,6 +592,7 @@ export class LambdaFailureDetector extends Construct {
    * @param scope - Parent construct.
    * @param id - Construct id.
    * @param props - Lambda, optional log group / retention, topic, alarm config, platform metrics, and log filters.
+   * @throws Error when both `logGroup` and `logRetention` are set.
    */
   constructor(scope: Construct, id: string, props: LambdaFailureDetectorProps) {
     super(scope, id);
