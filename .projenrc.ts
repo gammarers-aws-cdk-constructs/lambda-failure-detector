@@ -8,7 +8,7 @@ const project = new ProjenCdkConstructLibrary({
   releaseToNpm: true,
   npmTrustedPublishing: true,
   devDeps: [
-    '@gammarers/projen-projects@^0.5.0',
+    '@gammarers/projen-projects@^0.5.10',
   ],
 });
 project.synth();
