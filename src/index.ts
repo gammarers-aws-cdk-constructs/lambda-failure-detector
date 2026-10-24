@@ -13,3 +13,4 @@ export {
   type LambdaFailureDetection,
 } from './core/lambda-failure-detection';
 export type { LogFailureFilter } from './core/log-failure-filter';
+export type { PlatformMetricsOptions } from './core/platform-metrics-options';

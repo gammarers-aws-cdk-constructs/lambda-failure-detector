@@ -16,6 +16,8 @@ const EXPECTED_THRESHOLD = 1;
 const EXPECTED_EVALUATION_PERIODS = 1;
 /** Five-minute metric period, in seconds. */
 const EXPECTED_PERIOD_SECONDS = 300;
+/** Default IteratorAge threshold used by the construct. */
+const EXPECTED_ITERATOR_AGE_THRESHOLD_MS = 60_000;
 
 const RESOURCE_WAIT_FAILED: LogFailureFilter = {
   id: 'ResourceWaitFailed',
@@ -48,6 +50,7 @@ interface ExpectedAlarmShape {
   readonly evaluationPeriods?: number;
   readonly periodSeconds?: number;
   readonly treatMissingData?: string;
+  readonly statistic?: string;
 }
 
 const expectFailureAlarmShape = (
@@ -65,13 +68,25 @@ const expectFailureAlarmShape = (
       ComparisonOperator: 'GreaterThanOrEqualToThreshold',
       TreatMissingData: expected.treatMissingData ?? 'notBreaching',
       Period: expected.periodSeconds ?? EXPECTED_PERIOD_SECONDS,
-      Statistic: 'Sum',
+      Statistic: expected.statistic ?? 'Sum',
     }));
   }
 };
 
+const findAlarmByMetricName = (
+  template: Template,
+  metricName: string,
+): Record<string, unknown> => {
+  const alarms = Object.values(template.findResources('AWS::CloudWatch::Alarm'));
+  const match = alarms.find((alarm) => alarm.Properties.MetricName === metricName);
+  if (!match) {
+    throw new Error(`Alarm for metric ${metricName} was not found`);
+  }
+  return match.Properties as Record<string, unknown>;
+};
+
 describe('LambdaFailureDetector', () => {
-  it('alarms on Lambda Errors and does not attach SNS when no topic is given', () => {
+  it('alarms on Lambda Errors and Throttles and does not attach SNS when no topic is given', () => {
     const { stack, fn, logGroup } = createFixture();
 
     const detector = new LambdaFailureDetector(stack, 'Detector', {
@@ -80,16 +95,23 @@ describe('LambdaFailureDetector', () => {
     });
 
     const template = Template.fromStack(stack);
-    expectFailureAlarmShape(template, 1);
+    expectFailureAlarmShape(template, 2);
     template.resourceCountIs('AWS::Logs::MetricFilter', 0);
     expect(detector.alarmTopic).toBeUndefined();
     expect(detector.logFilterAlarms).toEqual([]);
     expect(detector.findLogFilterAlarm('ResourceWaitFailed')).toBeUndefined();
+    expect(detector.deadLetterErrorsAlarm).toBeUndefined();
+    expect(detector.destinationDeliveryFailuresAlarm).toBeUndefined();
+    expect(detector.iteratorAgeAlarm).toBeUndefined();
 
-    const alarms = Object.values(template.findResources('AWS::CloudWatch::Alarm'));
-    expect(alarms[0].Properties.AlarmActions).toBeUndefined();
-    expect(alarms[0].Properties.Namespace).toBe('AWS/Lambda');
-    expect(alarms[0].Properties.MetricName).toBe('Errors');
+    const errors = findAlarmByMetricName(template, 'Errors');
+    const throttles = findAlarmByMetricName(template, 'Throttles');
+    expect(errors.AlarmActions).toBeUndefined();
+    expect(errors.Namespace).toBe('AWS/Lambda');
+    expect(throttles.AlarmActions).toBeUndefined();
+    expect(throttles.Namespace).toBe('AWS/Lambda');
+    expect(detector.lambdaErrorsAlarm).toBeDefined();
+    expect(detector.lambdaThrottlesAlarm).toBeDefined();
   });
 
   it('creates one metric filter alarm per log filter and notifies the given topic', () => {
@@ -104,7 +126,7 @@ describe('LambdaFailureDetector', () => {
     });
 
     const template = Template.fromStack(stack);
-    expectFailureAlarmShape(template, 2);
+    expectFailureAlarmShape(template, 3);
     template.hasResourceProperties('AWS::Logs::MetricFilter', {
       FilterPattern: RESOURCE_WAIT_FAILED.filterPattern,
       MetricTransformations: [
@@ -143,12 +165,69 @@ describe('LambdaFailureDetector', () => {
       },
     });
 
-    expectFailureAlarmShape(Template.fromStack(stack), 2, {
+    expectFailureAlarmShape(Template.fromStack(stack), 3, {
       threshold: 3,
       evaluationPeriods: 2,
       periodSeconds: 60,
       treatMissingData: 'breaching',
     });
+  });
+
+  it('creates opt-in platform metric alarms when enabled', () => {
+    const { stack, fn, logGroup } = createFixture();
+
+    const detector = new LambdaFailureDetector(stack, 'Detector', {
+      lambdaFunction: fn,
+      logGroup,
+      platformMetrics: {
+        deadLetterErrors: true,
+        destinationDeliveryFailures: true,
+        iteratorAge: true,
+        iteratorAgeThreshold: 120_000,
+      },
+    });
+
+    const template = Template.fromStack(stack);
+    template.resourceCountIs('AWS::CloudWatch::Alarm', 5);
+
+    expect(detector.deadLetterErrorsAlarm).toBeDefined();
+    expect(detector.destinationDeliveryFailuresAlarm).toBeDefined();
+    expect(detector.iteratorAgeAlarm).toBeDefined();
+
+    expect(findAlarmByMetricName(template, 'DeadLetterErrors')).toEqual(expect.objectContaining({
+      Namespace: 'AWS/Lambda',
+      Statistic: 'Sum',
+      Threshold: EXPECTED_THRESHOLD,
+    }));
+    expect(findAlarmByMetricName(template, 'DestinationDeliveryFailures')).toEqual(expect.objectContaining({
+      Namespace: 'AWS/Lambda',
+      Statistic: 'Sum',
+      Threshold: EXPECTED_THRESHOLD,
+    }));
+    expect(findAlarmByMetricName(template, 'IteratorAge')).toEqual(expect.objectContaining({
+      Namespace: 'AWS/Lambda',
+      Statistic: 'Maximum',
+      Threshold: 120_000,
+      TreatMissingData: 'notBreaching',
+      Period: EXPECTED_PERIOD_SECONDS,
+    }));
+  });
+
+  it('uses the default IteratorAge threshold when omitted', () => {
+    const { stack, fn, logGroup } = createFixture();
+
+    new LambdaFailureDetector(stack, 'Detector', {
+      lambdaFunction: fn,
+      logGroup,
+      platformMetrics: {
+        iteratorAge: true,
+      },
+    });
+
+    const template = Template.fromStack(stack);
+    expect(findAlarmByMetricName(template, 'IteratorAge').Threshold).toBe(
+      EXPECTED_ITERATOR_AGE_THRESHOLD_MS,
+    );
   });
 });
 
@@ -188,10 +267,15 @@ describe('createLambdaFailureDetector', () => {
       lambdaFunction: fn,
       logGroup,
       logFilters: [RESOURCE_WAIT_FAILED],
+      platformMetrics: {
+        deadLetterErrors: true,
+      },
     });
 
     expect(detector).toBeInstanceOf(LambdaFailureDetector);
     expect(detector?.findLogFilterAlarm(RESOURCE_WAIT_FAILED.id)).toBeDefined();
-    Template.fromStack(stack).resourceCountIs('AWS::CloudWatch::Alarm', 2);
+    expect(detector?.deadLetterErrorsAlarm).toBeDefined();
+    // Errors + Throttles + DeadLetterErrors + one log filter
+    Template.fromStack(stack).resourceCountIs('AWS::CloudWatch::Alarm', 4);
   });
 });

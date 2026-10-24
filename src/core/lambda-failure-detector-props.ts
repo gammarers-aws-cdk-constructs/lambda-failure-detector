@@ -4,12 +4,13 @@ import type * as sns from 'aws-cdk-lib/aws-sns';
 import type { AlarmConfig } from './alarm-config';
 import type { LambdaFailureDetection } from './lambda-failure-detection';
 import type { LogFailureFilter } from './log-failure-filter';
+import type { PlatformMetricsOptions } from './platform-metrics-options';
 
 /**
  * Props for {@link LambdaFailureDetector}.
  */
 export interface LambdaFailureDetectorProps {
-  /** Lambda function whose platform `Errors` metric is alarmed. */
+  /** Lambda function whose platform failure metrics are alarmed. */
   readonly lambdaFunction: lambda.IFunction;
   /** Log group used for {@link LogFailureFilter} metric filters. */
   readonly logGroup: logs.ILogGroup;
@@ -20,11 +21,21 @@ export interface LambdaFailureDetectorProps {
    */
   readonly alarmTopic?: sns.ITopic;
   /**
-   * Shared CloudWatch alarm settings for every failure sum alarm.
+   * Shared CloudWatch alarm settings for failure alarms.
+   *
+   * Applies to sum metrics (`Errors`, `Throttles`, opt-in counts, and log filters).
+   * IteratorAge uses `period` / `evaluationPeriods` / `treatMissingData` from this
+   * config, but its threshold comes from {@link PlatformMetricsOptions.iteratorAgeThreshold}.
    *
    * @default threshold 1, period 5 minutes, evaluationPeriods 1, treatMissingData NOT_BREACHING
    */
   readonly alarmConfig?: AlarmConfig;
+  /**
+   * Opt-in platform metrics beyond the standard `Errors` and `Throttles` alarms.
+   *
+   * @default no additional platform metric alarms
+   */
+  readonly platformMetrics?: PlatformMetricsOptions;
   /**
    * Log-based failure filters. Each entry creates a metric filter and alarm.
    *
@@ -44,11 +55,17 @@ export interface CreateLambdaFailureDetectorProps {
   /** Application log group for log-based filters. */
   readonly logGroup: logs.ILogGroup;
   /**
-   * Shared CloudWatch alarm settings for every failure sum alarm.
+   * Shared CloudWatch alarm settings for failure alarms.
    *
    * @default threshold 1, period 5 minutes, evaluationPeriods 1, treatMissingData NOT_BREACHING
    */
   readonly alarmConfig?: AlarmConfig;
+  /**
+   * Opt-in platform metrics beyond the standard `Errors` and `Throttles` alarms.
+   *
+   * @default no additional platform metric alarms
+   */
+  readonly platformMetrics?: PlatformMetricsOptions;
   /**
    * Log-based failure filters.
    *
