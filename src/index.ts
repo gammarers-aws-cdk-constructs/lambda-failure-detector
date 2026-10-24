@@ -1,14 +1,14 @@
 export {
   createLambdaFailureDetector,
+  isLambdaFailureDetectionEnabled,
   LambdaFailureDetector,
 } from './lambda-failure-detector';
-export type { LogFailureAlarm } from './lambda-failure-detector';
 export type {
+  AlarmConfig,
   CreateLambdaFailureDetectorProps,
+  LambdaFailureDetection,
   LambdaFailureDetectorProps,
-} from './core/lambda-failure-detector-props';
-export {
-  isLambdaFailureDetectionEnabled,
-  type LambdaFailureDetection,
-} from './core/lambda-failure-detection';
-export type { LogFailureFilter } from './core/log-failure-filter';
+  LogFailureAlarm,
+  LogFailureFilter,
+  PlatformMetricsOptions,
+} from './lambda-failure-detector';
