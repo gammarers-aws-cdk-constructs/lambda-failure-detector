@@ -12,8 +12,29 @@ import type { PlatformMetricsOptions } from './platform-metrics-options';
 export interface LambdaFailureDetectorProps {
   /** Lambda function whose platform failure metrics are alarmed. */
   readonly lambdaFunction: lambda.IFunction;
-  /** Log group used for {@link LogFailureFilter} metric filters. */
-  readonly logGroup: logs.ILogGroup;
+  /**
+   * Log group used for {@link LogFailureFilter} metric filters.
+   *
+   * Required only when you pass {@link LambdaFailureDetectorProps.logFilters}
+   * and want to use an existing group. When omitted with log filters, the
+   * construct manages `/aws/lambda/<functionName>` and applies
+   * {@link LambdaFailureDetectorProps.logRetention}.
+   *
+   * Do not set together with {@link LambdaFailureDetectorProps.logRetention}.
+   */
+  readonly logGroup?: logs.ILogGroup;
+  /**
+   * Retention for the Lambda log group when the construct manages it.
+   *
+   * Used when {@link LambdaFailureDetectorProps.logFilters} are set and
+   * {@link LambdaFailureDetectorProps.logGroup} is omitted. Creating a
+   * `LogRetention` custom resource for `/aws/lambda/<functionName>`.
+   *
+   * Do not set together with {@link LambdaFailureDetectorProps.logGroup}.
+   *
+   * @default RetentionDays.ONE_YEAR
+   */
+  readonly logRetention?: logs.RetentionDays;
   /**
    * Optional SNS topic for all alarm actions.
    *
@@ -52,8 +73,20 @@ export interface CreateLambdaFailureDetectorProps {
   readonly failureDetection?: LambdaFailureDetection;
   /** Lambda function to monitor. */
   readonly lambdaFunction: lambda.IFunction;
-  /** Application log group for log-based filters. */
-  readonly logGroup: logs.ILogGroup;
+  /**
+   * Log group used for log-based filters.
+   *
+   * Same rules as {@link LambdaFailureDetectorProps.logGroup}.
+   */
+  readonly logGroup?: logs.ILogGroup;
+  /**
+   * Retention for the managed Lambda log group.
+   *
+   * Same rules as {@link LambdaFailureDetectorProps.logRetention}.
+   *
+   * @default RetentionDays.ONE_YEAR
+   */
+  readonly logRetention?: logs.RetentionDays;
   /**
    * Shared CloudWatch alarm settings for failure alarms.
    *

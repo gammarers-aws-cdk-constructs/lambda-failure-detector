@@ -28,6 +28,8 @@ const ITERATOR_AGE_STATISTIC = 'Maximum';
 const ITERATOR_AGE_DEFAULT_THRESHOLD_MS = 60_000;
 /** CloudWatch namespace for Lambda platform metrics. */
 const LAMBDA_METRIC_NAMESPACE = 'AWS/Lambda';
+/** Default retention when the construct manages the Lambda log group. */
+const DEFAULT_LOG_RETENTION = logs.RetentionDays.ONE_YEAR;
 /** Metric filter value emitted per matching log event. */
 const LOG_METRIC_VALUE = '1';
 /** Default value when no matching log events occur in the period. */
@@ -73,6 +75,51 @@ const resolveAlarmConfig = (config?: AlarmConfig): ResolvedAlarmConfig => ({
   evaluationPeriods: config?.evaluationPeriods ?? FAILURE_ALARM_EVALUATION_PERIODS,
   treatMissingData: config?.treatMissingData ?? cloudwatch.TreatMissingData.NOT_BREACHING,
 });
+
+/**
+ * Resolves the log group for metric filters, or undefined when none are needed.
+ *
+ * When `logFilters` is empty, no log group is required. When filters are present
+ * and `logGroup` is omitted, manages `/aws/lambda/<functionName>` with
+ * `logRetention` (default one year). Does not call `Function.logGroup`, which
+ * would otherwise attach infinite retention.
+ *
+ * @param scope - Parent construct for managed retention resources.
+ * @param lambdaFunction - Function whose default log group name is derived.
+ * @param logGroup - Explicit log group from the caller.
+ * @param logRetention - Retention when the construct manages the log group.
+ * @param logFilters - Log filters that require a log group.
+ * @returns Log group for metric filters, or undefined when unused.
+ */
+const resolveLogGroupForFilters = (
+  scope: Construct,
+  lambdaFunction: lambda.IFunction,
+  logGroup: logs.ILogGroup | undefined,
+  logRetention: logs.RetentionDays | undefined,
+  logFilters: LogFailureFilter[],
+): logs.ILogGroup | undefined => {
+  if (logGroup && logRetention !== undefined) {
+    throw new Error(
+      'Cannot set both logGroup and logRetention. Pass logGroup when you manage retention yourself, or omit logGroup to let the construct apply logRetention.',
+    );
+  }
+
+  if (logFilters.length === 0) {
+    return undefined;
+  }
+
+  if (logGroup) {
+    return logGroup;
+  }
+
+  const logGroupName = `/aws/lambda/${lambdaFunction.functionName}`;
+  const retention = new logs.LogRetention(scope, 'LogRetention', {
+    logGroupName,
+    retention: logRetention ?? DEFAULT_LOG_RETENTION,
+  });
+
+  return logs.LogGroup.fromLogGroupArn(scope, 'LogGroup', retention.logGroupArn);
+};
 
 /**
  * Registers an SNS alarm action when a topic is configured.
@@ -296,6 +343,12 @@ const createOptionalPlatformAlarms = (
 export class LambdaFailureDetector extends Construct {
   /** SNS topic used for alarm actions, when configured. */
   public readonly alarmTopic?: sns.ITopic;
+  /**
+   * Log group used for log metric filters, when log filters are configured.
+   *
+   * Undefined when there are no log filters.
+   */
+  public readonly logGroup?: logs.ILogGroup;
   /** Fires when the Lambda `Errors` metric is non-zero. */
   public readonly lambdaErrorsAlarm: cloudwatch.Alarm;
   /** Fires when the Lambda `Throttles` metric is non-zero. */
@@ -315,7 +368,7 @@ export class LambdaFailureDetector extends Construct {
   /**
    * @param scope - Parent construct.
    * @param id - Construct id.
-   * @param props - Lambda, log group, optional topic, alarm config, platform metrics, and log filters.
+   * @param props - Lambda, optional log group / retention, topic, alarm config, platform metrics, and log filters.
    */
   constructor(scope: Construct, id: string, props: LambdaFailureDetectorProps) {
     super(scope, id);
@@ -323,6 +376,15 @@ export class LambdaFailureDetector extends Construct {
     const alarmTopic = props.alarmTopic;
     this.alarmTopic = alarmTopic;
     const alarmConfig = resolveAlarmConfig(props.alarmConfig);
+    const logFilters = props.logFilters ?? [];
+    const logGroup = resolveLogGroupForFilters(
+      this,
+      props.lambdaFunction,
+      props.logGroup,
+      props.logRetention,
+      logFilters,
+    );
+    this.logGroup = logGroup;
 
     this.lambdaErrorsAlarm = createSumAlarm(
       this,
@@ -357,10 +419,14 @@ export class LambdaFailureDetector extends Construct {
     this.destinationDeliveryFailuresAlarm = optionalAlarms.destinationDeliveryFailuresAlarm;
     this.iteratorAgeAlarm = optionalAlarms.iteratorAgeAlarm;
 
-    const logFilters = props.logFilters ?? [];
+    if (!logGroup) {
+      this.logFilterAlarms = [];
+      return;
+    }
+
     this.logFilterAlarms = logFilters.map((filter) => createLogFilterAlarm(
       this,
-      props.logGroup,
+      logGroup,
       filter,
       alarmConfig,
       alarmTopic,
@@ -383,7 +449,7 @@ export class LambdaFailureDetector extends Construct {
  *
  * @param scope - Parent construct.
  * @param id - Construct id.
- * @param props - Lambda, log group, optional opt-in options, alarm config, platform metrics, and log filters.
+ * @param props - Lambda, optional log group / retention, opt-in options, alarm config, platform metrics, and log filters.
  * @returns Detector construct, or undefined when disabled.
  */
 export const createLambdaFailureDetector = (
@@ -403,6 +469,7 @@ export const createLambdaFailureDetector = (
   return new LambdaFailureDetector(scope, id, {
     lambdaFunction: props.lambdaFunction,
     logGroup: props.logGroup,
+    logRetention: props.logRetention,
     alarmTopic: failureDetection.alarmTopic,
     alarmConfig: props.alarmConfig,
     platformMetrics: props.platformMetrics,

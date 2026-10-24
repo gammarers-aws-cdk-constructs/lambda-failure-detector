@@ -13,17 +13,17 @@ Creates Amazon CloudWatch alarms for an AWS Lambda function. The construct alarm
 
 - CloudWatch alarms on the Lambda `Errors` and `Throttles` metrics
 - Optional platform alarms for `DeadLetterErrors`, `DestinationDeliveryFailures`, and stream `IteratorAge`
-- Optional log-pattern metric filters and alarms
+- Optional log-pattern metric filters and alarms (log group optional; managed with configurable retention, default one year)
 - Optional shared `alarmConfig` for threshold, period, evaluation periods, and missing-data handling
 - Optional notifications through an existing SNS topic
 - Opt-in helper that creates the construct only when failure detection is enabled
 
 ## How it works
 
-1. You pass a Lambda function and the log group that holds its application logs.
+1. You pass a Lambda function. A log group is needed only when you supply `logFilters`.
 2. The construct creates CloudWatch alarms on the `AWS/Lambda` `Errors` and `Throttles` metrics. By default, missing data does not breach, so a quiet schedule stays quiet between runs.
 3. When you enable entries in `platformMetrics`, the construct adds matching platform alarms (`DeadLetterErrors`, `DestinationDeliveryFailures`, and/or `IteratorAge`).
-4. For each log filter, the construct adds a metric filter on that log group and an alarm on the filter's sum.
+4. For each log filter, the construct adds a metric filter and an alarm on the filter's sum. Pass `logGroup` to use an existing group, or omit it to manage `/aws/lambda/<functionName>` with `logRetention` (default one year).
 5. When you pass `alarmConfig`, failure sum alarms use those settings. IteratorAge uses the same period and evaluation settings, but its threshold comes from `platformMetrics.iteratorAgeThreshold` (default 60000 ms). When you omit `alarmConfig`, the defaults are threshold 1, period 5 minutes, evaluationPeriods 1, and treatMissingData `NOT_BREACHING`.
 6. When you pass an SNS topic, every alarm notifies that topic. When you omit the topic, the alarms remain and have no SNS action.
 7. `createLambdaFailureDetector` creates the construct only when failure detection is enabled.
@@ -53,7 +53,6 @@ pnpm add lambda-failure-detector
 ```ts
 import { Stack, StackProps } from 'aws-cdk-lib';
 import * as lambda from 'aws-cdk-lib/aws-lambda';
-import * as logs from 'aws-cdk-lib/aws-logs';
 import { Construct } from 'constructs';
 import { LambdaFailureDetector } from 'lambda-failure-detector';
 
@@ -66,21 +65,20 @@ export class ExampleStack extends Stack {
       handler: 'index.handler',
       code: lambda.Code.fromInline('exports.handler = async () => undefined;'),
     });
-    const logGroup = new logs.LogGroup(this, 'Logs');
 
     new LambdaFailureDetector(this, 'FailureDetector', {
       lambdaFunction: fn,
-      logGroup,
     });
   }
 }
 ```
 
-To alarm on a log line and notify an existing topic, pass `logFilters` and `alarmTopic`. Use `createLambdaFailureDetector` when creation itself is optional. Pass `alarmConfig` when the default threshold or evaluation window needs tuning.
+To alarm on a log line and notify an existing topic, pass `logFilters` and `alarmTopic`. Omit `logGroup` to manage `/aws/lambda/<functionName>` with one-year retention (or set `logRetention`). Use `createLambdaFailureDetector` when creation itself is optional. Pass `alarmConfig` when the default threshold or evaluation window needs tuning.
 
 ```ts
 import { Duration } from 'aws-cdk-lib';
 import * as cloudwatch from 'aws-cdk-lib/aws-cloudwatch';
+import * as logs from 'aws-cdk-lib/aws-logs';
 import * as sns from 'aws-cdk-lib/aws-sns';
 import { createLambdaFailureDetector } from 'lambda-failure-detector';
 
@@ -92,7 +90,7 @@ const detector = createLambdaFailureDetector(this, 'FailureDetector', {
     alarmTopic: topic,
   },
   lambdaFunction: fn,
-  logGroup,
+  logRetention: logs.RetentionDays.THREE_MONTHS,
   alarmConfig: {
     threshold: 3,
     period: Duration.minutes(1),
@@ -117,7 +115,8 @@ const detector = createLambdaFailureDetector(this, 'FailureDetector', {
 | Property | Type | Required | Description |
 | --- | --- | --- | --- |
 | `lambdaFunction` | `lambda.IFunction` | yes | Lambda function whose platform failure metrics are alarmed. |
-| `logGroup` | `logs.ILogGroup` | yes | Log group used for log metric filters. |
+| `logGroup` | `logs.ILogGroup` | no | Log group for log metric filters. Omit with `logFilters` to manage `/aws/lambda/<functionName>`. Do not set with `logRetention`. |
+| `logRetention` | `logs.RetentionDays` | no | Retention when the construct manages the Lambda log group. Default: `ONE_YEAR`. Do not set with `logGroup`. |
 | `alarmTopic` | `sns.ITopic` | no | SNS topic for every alarm action. When omitted, alarms have no SNS actions. |
 | `alarmConfig` | `AlarmConfig` | no | Shared settings for failure alarms. Default: threshold 1, period 5 minutes, evaluationPeriods 1, treatMissingData `NOT_BREACHING`. |
 | `platformMetrics` | `PlatformMetricsOptions` | no | Opt-in platform metrics beyond `Errors` and `Throttles`. Default: no additional platform metric alarms. |
@@ -129,7 +128,8 @@ const detector = createLambdaFailureDetector(this, 'FailureDetector', {
 | --- | --- | --- | --- |
 | `failureDetection` | `LambdaFailureDetection` | no | Opt-in options. Alarms are created only when `enabled` is true. |
 | `lambdaFunction` | `lambda.IFunction` | yes | Lambda function to monitor. |
-| `logGroup` | `logs.ILogGroup` | yes | Application log group for log-based filters. |
+| `logGroup` | `logs.ILogGroup` | no | Log group for log-based filters. Same rules as `LambdaFailureDetectorProps.logGroup`. |
+| `logRetention` | `logs.RetentionDays` | no | Retention when the construct manages the Lambda log group. Default: `ONE_YEAR`. |
 | `alarmConfig` | `AlarmConfig` | no | Shared settings for failure alarms. Default: threshold 1, period 5 minutes, evaluationPeriods 1, treatMissingData `NOT_BREACHING`. |
 | `platformMetrics` | `PlatformMetricsOptions` | no | Opt-in platform metrics beyond `Errors` and `Throttles`. Default: no additional platform metric alarms. |
 | `logFilters` | `LogFailureFilter[]` | no | Log-based failure filters. Default: no log-based alarms. |
