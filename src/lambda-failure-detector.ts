@@ -5,14 +5,246 @@ import * as lambda from 'aws-cdk-lib/aws-lambda';
 import * as logs from 'aws-cdk-lib/aws-logs';
 import * as sns from 'aws-cdk-lib/aws-sns';
 import { Construct } from 'constructs';
-import type { AlarmConfig } from './core/alarm-config';
-import { isLambdaFailureDetectionEnabled } from './core/lambda-failure-detection';
-import type {
-  CreateLambdaFailureDetectorProps,
-  LambdaFailureDetectorProps,
-} from './core/lambda-failure-detector-props';
-import type { LogFailureFilter } from './core/log-failure-filter';
-import type { PlatformMetricsOptions } from './core/platform-metrics-options';
+
+/**
+ * CloudWatch alarm settings for failure metrics.
+ *
+ * Omitted fields keep the construct defaults
+ * (threshold 1, period 5 minutes, evaluationPeriods 1,
+ * treatMissingData `NOT_BREACHING`).
+ * `threshold` applies to sum metrics only; IteratorAge uses
+ * {@link PlatformMetricsOptions.iteratorAgeThreshold}.
+ */
+export interface AlarmConfig {
+  /**
+   * Alarm threshold for sum metrics.
+   *
+   * @default 1
+   */
+  readonly threshold?: number;
+  /**
+   * Metric period used by the alarm.
+   *
+   * @default Duration.minutes(5)
+   */
+  readonly period?: Duration;
+  /**
+   * Number of periods that must breach before the alarm fires.
+   *
+   * @default 1
+   */
+  readonly evaluationPeriods?: number;
+  /**
+   * How missing datapoints are treated.
+   *
+   * @default TreatMissingData.NOT_BREACHING
+   */
+  readonly treatMissingData?: cloudwatch.TreatMissingData;
+}
+
+/**
+ * One log-based failure signal for {@link LambdaFailureDetector}.
+ *
+ * Creates a CloudWatch Logs metric filter and an alarm on the resulting sum metric.
+ */
+export interface LogFailureFilter {
+  /**
+   * Stable id used as the MetricFilter / Alarm construct id prefix
+   * (e.g. `InstanceStatusFailure` → `InstanceStatusFailureMetric`).
+   */
+  readonly id: string;
+  /**
+   * CloudWatch Logs filter pattern string passed to `FilterPattern.literal`.
+   *
+   * @example '"ResourceWaitFailed"'
+   */
+  readonly filterPattern: string;
+  /** Custom metric namespace for the metric filter. */
+  readonly metricNamespace: string;
+  /** Custom metric name for the metric filter. */
+  readonly metricName: string;
+}
+
+/**
+ * Opt-in platform metrics beyond the standard `Errors` and `Throttles` alarms.
+ *
+ * `Errors` and `Throttles` are always created. Enable the flags below when the
+ * function uses a dead-letter queue, on-failure destination, or stream source.
+ */
+export interface PlatformMetricsOptions {
+  /**
+   * Create an alarm on the `AWS/Lambda` `DeadLetterErrors` sum metric.
+   *
+   * @default false
+   */
+  readonly deadLetterErrors?: boolean;
+  /**
+   * Create an alarm on the `AWS/Lambda` `DestinationDeliveryFailures` sum metric.
+   *
+   * @default false
+   */
+  readonly destinationDeliveryFailures?: boolean;
+  /**
+   * Create an alarm on the `AWS/Lambda` `IteratorAge` maximum metric.
+   *
+   * Intended for functions with stream event sources (Kinesis, DynamoDB Streams).
+   *
+   * @default false
+   */
+  readonly iteratorAge?: boolean;
+  /**
+   * Threshold in milliseconds for the IteratorAge alarm.
+   *
+   * Used only when {@link PlatformMetricsOptions.iteratorAge} is true.
+   * Shared {@link AlarmConfig.threshold} does not apply (that value is for sum counts).
+   *
+   * @default 60000
+   */
+  readonly iteratorAgeThreshold?: number;
+}
+
+/**
+ * Opt-in options for {@link createLambdaFailureDetector}.
+ *
+ * When {@link LambdaFailureDetection.enabled} is true, alarms are created.
+ * {@link LambdaFailureDetection.alarmTopic} is optional; when omitted, alarms have no SNS actions.
+ * The construct never creates an SNS topic.
+ */
+export interface LambdaFailureDetection {
+  /**
+   * When true, creates failure detection alarms and log-based metrics.
+   *
+   * @default false when omitted
+   */
+  readonly enabled?: boolean;
+  /**
+   * SNS topic for alarm notifications.
+   *
+   * When omitted, alarms are created without SNS actions.
+   */
+  readonly alarmTopic?: sns.ITopic;
+}
+
+/**
+ * Props for {@link LambdaFailureDetector}.
+ */
+export interface LambdaFailureDetectorProps {
+  /** Lambda function whose platform failure metrics are alarmed. */
+  readonly lambdaFunction: lambda.IFunction;
+  /**
+   * Log group used for {@link LogFailureFilter} metric filters.
+   *
+   * Required only when you pass {@link LambdaFailureDetectorProps.logFilters}
+   * and want to use an existing group. When omitted with log filters, the
+   * construct manages `/aws/lambda/<functionName>` and applies
+   * {@link LambdaFailureDetectorProps.logRetention}.
+   *
+   * Do not set together with {@link LambdaFailureDetectorProps.logRetention}.
+   */
+  readonly logGroup?: logs.ILogGroup;
+  /**
+   * Retention for the Lambda log group when the construct manages it.
+   *
+   * Used when {@link LambdaFailureDetectorProps.logFilters} are set and
+   * {@link LambdaFailureDetectorProps.logGroup} is omitted. Creates a
+   * `LogRetention` custom resource for `/aws/lambda/<functionName>`.
+   *
+   * Do not set together with {@link LambdaFailureDetectorProps.logGroup}.
+   *
+   * @default RetentionDays.ONE_YEAR
+   */
+  readonly logRetention?: logs.RetentionDays;
+  /**
+   * Optional SNS topic for all alarm actions.
+   *
+   * When omitted, alarms are created without SNS actions.
+   */
+  readonly alarmTopic?: sns.ITopic;
+  /**
+   * Shared CloudWatch alarm settings for failure alarms.
+   *
+   * Applies to sum metrics (`Errors`, `Throttles`, opt-in counts, and log filters).
+   * IteratorAge uses `period` / `evaluationPeriods` / `treatMissingData` from this
+   * config, but its threshold comes from {@link PlatformMetricsOptions.iteratorAgeThreshold}.
+   *
+   * @default threshold 1, period 5 minutes, evaluationPeriods 1, treatMissingData NOT_BREACHING
+   */
+  readonly alarmConfig?: AlarmConfig;
+  /**
+   * Opt-in platform metrics beyond the standard `Errors` and `Throttles` alarms.
+   *
+   * @default no additional platform metric alarms
+   */
+  readonly platformMetrics?: PlatformMetricsOptions;
+  /**
+   * Log-based failure filters. Each entry creates a metric filter and alarm.
+   *
+   * @default no log-based alarms
+   */
+  readonly logFilters?: LogFailureFilter[];
+}
+
+/**
+ * Props accepted by {@link createLambdaFailureDetector}.
+ */
+export interface CreateLambdaFailureDetectorProps {
+  /** Opt-in options; alarms are created only when {@link LambdaFailureDetection.enabled} is true. */
+  readonly failureDetection?: LambdaFailureDetection;
+  /** Lambda function to monitor. */
+  readonly lambdaFunction: lambda.IFunction;
+  /**
+   * Log group used for log-based filters.
+   *
+   * Same rules as {@link LambdaFailureDetectorProps.logGroup}.
+   */
+  readonly logGroup?: logs.ILogGroup;
+  /**
+   * Retention for the managed Lambda log group.
+   *
+   * Same rules as {@link LambdaFailureDetectorProps.logRetention}.
+   *
+   * @default RetentionDays.ONE_YEAR
+   */
+  readonly logRetention?: logs.RetentionDays;
+  /**
+   * Shared CloudWatch alarm settings for failure alarms.
+   *
+   * @default threshold 1, period 5 minutes, evaluationPeriods 1, treatMissingData NOT_BREACHING
+   */
+  readonly alarmConfig?: AlarmConfig;
+  /**
+   * Opt-in platform metrics beyond the standard `Errors` and `Throttles` alarms.
+   *
+   * @default no additional platform metric alarms
+   */
+  readonly platformMetrics?: PlatformMetricsOptions;
+  /**
+   * Log-based failure filters.
+   *
+   * @default no log-based alarms
+   */
+  readonly logFilters?: LogFailureFilter[];
+}
+
+/**
+ * Alarm created for one {@link LogFailureFilter}.
+ */
+export interface LogFailureAlarm {
+  /** Same as {@link LogFailureFilter.id}. */
+  readonly id: string;
+  /** Alarm on the log metric filter sum. */
+  readonly alarm: cloudwatch.Alarm;
+}
+
+/**
+ * Whether {@link LambdaFailureDetection} requests alarm creation.
+ *
+ * @param failureDetection - Opt-in options from the caller.
+ * @returns True only when `enabled` is strictly true.
+ */
+export const isLambdaFailureDetectionEnabled = (
+  failureDetection: LambdaFailureDetection,
+): boolean => failureDetection.enabled === true;
 
 /** Alarm threshold for failure sum metrics. */
 const FAILURE_ALARM_THRESHOLD = 1;
@@ -43,16 +275,6 @@ interface ResolvedAlarmConfig {
   readonly period: Duration;
   readonly evaluationPeriods: number;
   readonly treatMissingData: cloudwatch.TreatMissingData;
-}
-
-/**
- * Alarm created for one {@link LogFailureFilter}.
- */
-export interface LogFailureAlarm {
-  /** Same as {@link LogFailureFilter.id}. */
-  readonly id: string;
-  /** Alarm on the log metric filter sum. */
-  readonly alarm: cloudwatch.Alarm;
 }
 
 interface MetricAlarmProps {
