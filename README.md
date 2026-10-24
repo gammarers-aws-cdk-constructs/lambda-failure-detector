@@ -13,16 +13,18 @@ Creates Amazon CloudWatch alarms for an AWS Lambda function. The construct alarm
 
 - CloudWatch alarm on the Lambda `Errors` metric
 - Optional log-pattern metric filters and alarms
+- Optional shared `alarmConfig` for threshold, period, evaluation periods, and missing-data handling
 - Optional notifications through an existing SNS topic
 - Opt-in helper that creates the construct only when failure detection is enabled
 
 ## How it works
 
 1. You pass a Lambda function and the log group that holds its application logs.
-2. The construct creates a CloudWatch alarm on the `AWS/Lambda` `Errors` metric. Missing data does not breach, so a quiet schedule stays quiet between runs.
+2. The construct creates a CloudWatch alarm on the `AWS/Lambda` `Errors` metric. By default, missing data does not breach, so a quiet schedule stays quiet between runs.
 3. For each log filter, the construct adds a metric filter on that log group and an alarm on the filter's sum.
-4. When you pass an SNS topic, every alarm notifies that topic. When you omit the topic, the alarms remain and have no SNS action.
-5. `createLambdaFailureDetector` creates the construct only when failure detection is enabled.
+4. When you pass `alarmConfig`, every failure sum alarm uses those settings. When you omit it, the defaults are threshold 1, period 5 minutes, evaluationPeriods 1, and treatMissingData `NOT_BREACHING`.
+5. When you pass an SNS topic, every alarm notifies that topic. When you omit the topic, the alarms remain and have no SNS action.
+6. `createLambdaFailureDetector` creates the construct only when failure detection is enabled.
 
 ## Installation
 
@@ -72,9 +74,11 @@ export class ExampleStack extends Stack {
 }
 ```
 
-To alarm on a log line and notify an existing topic, pass `logFilters` and `alarmTopic`. Use `createLambdaFailureDetector` when creation itself is optional.
+To alarm on a log line and notify an existing topic, pass `logFilters` and `alarmTopic`. Use `createLambdaFailureDetector` when creation itself is optional. Pass `alarmConfig` when the default threshold or evaluation window needs tuning.
 
 ```ts
+import { Duration } from 'aws-cdk-lib';
+import * as cloudwatch from 'aws-cdk-lib/aws-cloudwatch';
 import * as sns from 'aws-cdk-lib/aws-sns';
 import { createLambdaFailureDetector } from 'lambda-failure-detector';
 
@@ -87,6 +91,12 @@ const detector = createLambdaFailureDetector(this, 'FailureDetector', {
   },
   lambdaFunction: fn,
   logGroup,
+  alarmConfig: {
+    threshold: 3,
+    period: Duration.minutes(1),
+    evaluationPeriods: 2,
+    treatMissingData: cloudwatch.TreatMissingData.BREACHING,
+  },
   logFilters: [
     {
       id: 'ResourceWaitFailed',
@@ -107,6 +117,7 @@ const detector = createLambdaFailureDetector(this, 'FailureDetector', {
 | `lambdaFunction` | `lambda.IFunction` | yes | Lambda function whose platform `Errors` metric is alarmed. |
 | `logGroup` | `logs.ILogGroup` | yes | Log group used for log metric filters. |
 | `alarmTopic` | `sns.ITopic` | no | SNS topic for every alarm action. When omitted, alarms have no SNS actions. |
+| `alarmConfig` | `AlarmConfig` | no | Shared settings for every failure sum alarm. Default: threshold 1, period 5 minutes, evaluationPeriods 1, treatMissingData `NOT_BREACHING`. |
 | `logFilters` | `LogFailureFilter[]` | no | Log-based failure filters. Default: no log-based alarms. |
 
 ### CreateLambdaFailureDetectorProps
@@ -116,7 +127,17 @@ const detector = createLambdaFailureDetector(this, 'FailureDetector', {
 | `failureDetection` | `LambdaFailureDetection` | no | Opt-in options. Alarms are created only when `enabled` is true. |
 | `lambdaFunction` | `lambda.IFunction` | yes | Lambda function to monitor. |
 | `logGroup` | `logs.ILogGroup` | yes | Application log group for log-based filters. |
+| `alarmConfig` | `AlarmConfig` | no | Shared settings for every failure sum alarm. Default: threshold 1, period 5 minutes, evaluationPeriods 1, treatMissingData `NOT_BREACHING`. |
 | `logFilters` | `LogFailureFilter[]` | no | Log-based failure filters. Default: no log-based alarms. |
+
+### AlarmConfig
+
+| Property | Type | Required | Description |
+| --- | --- | --- | --- |
+| `threshold` | `number` | no | Alarm threshold for the sum metric. Default: 1. |
+| `period` | `Duration` | no | Metric period used by the alarm. Default: 5 minutes. |
+| `evaluationPeriods` | `number` | no | Number of periods that must breach before the alarm fires. Default: 1. |
+| `treatMissingData` | `cloudwatch.TreatMissingData` | no | How missing datapoints are treated. Default: `NOT_BREACHING`. |
 
 ### LambdaFailureDetection
 

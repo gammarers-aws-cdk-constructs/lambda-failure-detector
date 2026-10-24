@@ -3,6 +3,7 @@ export {
   LambdaFailureDetector,
 } from './lambda-failure-detector';
 export type { LogFailureAlarm } from './lambda-failure-detector';
+export type { AlarmConfig } from './core/alarm-config';
 export type {
   CreateLambdaFailureDetectorProps,
   LambdaFailureDetectorProps,

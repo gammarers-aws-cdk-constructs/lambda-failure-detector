@@ -1,5 +1,6 @@
-import { App, Stack } from 'aws-cdk-lib';
+import { App, Duration, Stack } from 'aws-cdk-lib';
 import { Template } from 'aws-cdk-lib/assertions';
+import * as cloudwatch from 'aws-cdk-lib/aws-cloudwatch';
 import * as lambda from 'aws-cdk-lib/aws-lambda';
 import * as logs from 'aws-cdk-lib/aws-logs';
 import * as sns from 'aws-cdk-lib/aws-sns';
@@ -42,17 +43,28 @@ const createFixture = (): DetectorFixture => {
   return { stack, fn, logGroup };
 };
 
-const expectFailureAlarmShape = (template: Template, alarmCount: number): void => {
+interface ExpectedAlarmShape {
+  readonly threshold?: number;
+  readonly evaluationPeriods?: number;
+  readonly periodSeconds?: number;
+  readonly treatMissingData?: string;
+}
+
+const expectFailureAlarmShape = (
+  template: Template,
+  alarmCount: number,
+  expected: ExpectedAlarmShape = {},
+): void => {
   template.resourceCountIs('AWS::CloudWatch::Alarm', alarmCount);
 
   const alarms = Object.values(template.findResources('AWS::CloudWatch::Alarm'));
   for (const alarm of alarms) {
     expect(alarm.Properties).toEqual(expect.objectContaining({
-      Threshold: EXPECTED_THRESHOLD,
-      EvaluationPeriods: EXPECTED_EVALUATION_PERIODS,
+      Threshold: expected.threshold ?? EXPECTED_THRESHOLD,
+      EvaluationPeriods: expected.evaluationPeriods ?? EXPECTED_EVALUATION_PERIODS,
       ComparisonOperator: 'GreaterThanOrEqualToThreshold',
-      TreatMissingData: 'notBreaching',
-      Period: EXPECTED_PERIOD_SECONDS,
+      TreatMissingData: expected.treatMissingData ?? 'notBreaching',
+      Period: expected.periodSeconds ?? EXPECTED_PERIOD_SECONDS,
       Statistic: 'Sum',
     }));
   }
@@ -114,6 +126,29 @@ describe('LambdaFailureDetector', () => {
     for (const alarm of alarms) {
       expect(alarm.Properties.AlarmActions).toHaveLength(1);
     }
+  });
+
+  it('applies alarmConfig to every failure sum alarm', () => {
+    const { stack, fn, logGroup } = createFixture();
+
+    new LambdaFailureDetector(stack, 'Detector', {
+      lambdaFunction: fn,
+      logGroup,
+      logFilters: [RESOURCE_WAIT_FAILED],
+      alarmConfig: {
+        threshold: 3,
+        period: Duration.minutes(1),
+        evaluationPeriods: 2,
+        treatMissingData: cloudwatch.TreatMissingData.BREACHING,
+      },
+    });
+
+    expectFailureAlarmShape(Template.fromStack(stack), 2, {
+      threshold: 3,
+      evaluationPeriods: 2,
+      periodSeconds: 60,
+      treatMissingData: 'breaching',
+    });
   });
 });
 

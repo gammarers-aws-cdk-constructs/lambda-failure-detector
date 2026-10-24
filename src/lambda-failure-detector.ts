@@ -4,6 +4,7 @@ import * as cloudwatch_actions from 'aws-cdk-lib/aws-cloudwatch-actions';
 import * as logs from 'aws-cdk-lib/aws-logs';
 import * as sns from 'aws-cdk-lib/aws-sns';
 import { Construct } from 'constructs';
+import type { AlarmConfig } from './core/alarm-config';
 import { isLambdaFailureDetectionEnabled } from './core/lambda-failure-detection';
 import type {
   CreateLambdaFailureDetectorProps,
@@ -25,6 +26,16 @@ const LOG_METRIC_VALUE = '1';
 const LOG_METRIC_DEFAULT_VALUE = 0;
 
 /**
+ * Resolved alarm settings after applying {@link AlarmConfig} defaults.
+ */
+interface ResolvedAlarmConfig {
+  readonly threshold: number;
+  readonly period: Duration;
+  readonly evaluationPeriods: number;
+  readonly treatMissingData: cloudwatch.TreatMissingData;
+}
+
+/**
  * Alarm created for one {@link LogFailureFilter}.
  */
 export interface LogFailureAlarm {
@@ -36,8 +47,22 @@ export interface LogFailureAlarm {
 
 interface SumAlarmProps {
   readonly metric: cloudwatch.IMetric;
+  readonly alarmConfig: ResolvedAlarmConfig;
   readonly alarmTopic?: sns.ITopic;
 }
+
+/**
+ * Fills omitted {@link AlarmConfig} fields with construct defaults.
+ *
+ * @param config - Optional caller overrides.
+ * @returns Fully resolved alarm settings.
+ */
+const resolveAlarmConfig = (config?: AlarmConfig): ResolvedAlarmConfig => ({
+  threshold: config?.threshold ?? FAILURE_ALARM_THRESHOLD,
+  period: config?.period ?? FAILURE_ALARM_PERIOD,
+  evaluationPeriods: config?.evaluationPeriods ?? FAILURE_ALARM_EVALUATION_PERIODS,
+  treatMissingData: config?.treatMissingData ?? cloudwatch.TreatMissingData.NOT_BREACHING,
+});
 
 /**
  * Registers an SNS alarm action when a topic is configured.
@@ -56,14 +81,14 @@ const attachAlarmActions = (alarm: cloudwatch.Alarm, alarmTopic?: sns.ITopic): v
 /**
  * Creates a CloudWatch alarm that fires when a sum metric is at or above the failure threshold.
  *
- * Missing data is not breaching, so a quiet schedule does not alarm between runs.
+ * Missing data defaults to not breaching, so a quiet schedule does not alarm between runs.
  * `aws-cdk-lib` 2.232.0 types `CreateAlarmOptionsBase` as an empty export, so
  * `evaluationPeriods` and `treatMissingData` are absent from `AlarmProps`.
  * The alarm construct still forwards both properties to `CfnAlarm`.
  *
  * @param scope - Parent construct.
  * @param id - Construct id.
- * @param props - Metric to alarm, and an optional SNS topic.
+ * @param props - Metric, resolved alarm settings, and an optional SNS topic.
  * @returns Alarm configured for a failure sum.
  */
 const createSumAlarm = (
@@ -73,10 +98,10 @@ const createSumAlarm = (
 ): cloudwatch.Alarm => {
   const alarmProps = {
     metric: props.metric,
-    threshold: FAILURE_ALARM_THRESHOLD,
+    threshold: props.alarmConfig.threshold,
     comparisonOperator: cloudwatch.ComparisonOperator.GREATER_THAN_OR_EQUAL_TO_THRESHOLD,
-    evaluationPeriods: FAILURE_ALARM_EVALUATION_PERIODS,
-    treatMissingData: cloudwatch.TreatMissingData.NOT_BREACHING,
+    evaluationPeriods: props.alarmConfig.evaluationPeriods,
+    treatMissingData: props.alarmConfig.treatMissingData,
   };
   const alarm = new cloudwatch.Alarm(scope, id, alarmProps);
   attachAlarmActions(alarm, props.alarmTopic);
@@ -89,6 +114,7 @@ const createSumAlarm = (
  * @param scope - Parent construct.
  * @param logGroup - Log group the filter reads.
  * @param filter - Log pattern and custom metric names.
+ * @param alarmConfig - Resolved alarm settings.
  * @param alarmTopic - Optional topic attached to the alarm.
  * @returns Filter id and its alarm.
  */
@@ -96,6 +122,7 @@ const createLogFilterAlarm = (
   scope: Construct,
   logGroup: logs.ILogGroup,
   filter: LogFailureFilter,
+  alarmConfig: ResolvedAlarmConfig,
   alarmTopic?: sns.ITopic,
 ): LogFailureAlarm => {
   const metricFilter = new logs.MetricFilter(scope, `${filter.id}Metric`, {
@@ -108,9 +135,10 @@ const createLogFilterAlarm = (
   });
   const alarm = createSumAlarm(scope, `${filter.id}Alarm`, {
     metric: metricFilter.metric({
-      period: FAILURE_ALARM_PERIOD,
+      period: alarmConfig.period,
       statistic: FAILURE_ALARM_STATISTIC,
     }),
+    alarmConfig,
     alarmTopic,
   });
 
@@ -138,19 +166,21 @@ export class LambdaFailureDetector extends Construct {
   /**
    * @param scope - Parent construct.
    * @param id - Construct id.
-   * @param props - Lambda, log group, optional topic, and log filters.
+   * @param props - Lambda, log group, optional topic, alarm config, and log filters.
    */
   constructor(scope: Construct, id: string, props: LambdaFailureDetectorProps) {
     super(scope, id);
 
     const alarmTopic = props.alarmTopic;
     this.alarmTopic = alarmTopic;
+    const alarmConfig = resolveAlarmConfig(props.alarmConfig);
 
     this.lambdaErrorsAlarm = createSumAlarm(this, 'LambdaErrorsAlarm', {
       metric: props.lambdaFunction.metricErrors({
-        period: FAILURE_ALARM_PERIOD,
+        period: alarmConfig.period,
         statistic: FAILURE_ALARM_STATISTIC,
       }),
+      alarmConfig,
       alarmTopic,
     });
 
@@ -159,6 +189,7 @@ export class LambdaFailureDetector extends Construct {
       this,
       props.logGroup,
       filter,
+      alarmConfig,
       alarmTopic,
     ));
   }
@@ -179,7 +210,7 @@ export class LambdaFailureDetector extends Construct {
  *
  * @param scope - Parent construct.
  * @param id - Construct id.
- * @param props - Lambda, log group, optional opt-in options, and log filters.
+ * @param props - Lambda, log group, optional opt-in options, alarm config, and log filters.
  * @returns Detector construct, or undefined when disabled.
  */
 export const createLambdaFailureDetector = (
@@ -200,6 +231,7 @@ export const createLambdaFailureDetector = (
     lambdaFunction: props.lambdaFunction,
     logGroup: props.logGroup,
     alarmTopic: failureDetection.alarmTopic,
+    alarmConfig: props.alarmConfig,
     logFilters: props.logFilters,
   });
 };
