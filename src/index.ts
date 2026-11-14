@@ -1,12 +1,8 @@
-export {
-  createLambdaFailureDetector,
-  isLambdaFailureDetectionEnabled,
-  LambdaFailureDetector,
-} from './lambda-failure-detector';
+export { LambdaFailureDetector } from './lambda-failure-detector';
 export type {
   AlarmConfig,
-  CreateLambdaFailureDetectorProps,
-  LambdaFailureDetection,
+  LambdaFailureDetectorAlarmProps,
+  LambdaFailureDetectorLogProps,
   LambdaFailureDetectorProps,
   LogFailureAlarm,
   LogFailureFilter,
