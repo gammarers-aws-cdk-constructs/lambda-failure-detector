@@ -1,10 +1,354 @@
 import { Duration } from 'aws-cdk-lib';
-import * as cloudwatch from 'aws-cdk-lib/aws-cloudwatch';
-import * as cloudwatch_actions from 'aws-cdk-lib/aws-cloudwatch-actions';
-import * as lambda from 'aws-cdk-lib/aws-lambda';
-import * as logs from 'aws-cdk-lib/aws-logs';
-import * as sns from 'aws-cdk-lib/aws-sns';
+import {
+  Alarm,
+  ComparisonOperator,
+  Metric,
+  TreatMissingData,
+  type IMetric,
+} from 'aws-cdk-lib/aws-cloudwatch';
+import { SnsAction } from 'aws-cdk-lib/aws-cloudwatch-actions';
+import { type IFunction } from 'aws-cdk-lib/aws-lambda';
+import {
+  LogGroup,
+  LogRetention,
+  MetricFilter,
+  RetentionDays,
+  type IFilterPattern,
+  type ILogGroup,
+} from 'aws-cdk-lib/aws-logs';
+import { type ITopic } from 'aws-cdk-lib/aws-sns';
 import { Construct } from 'constructs';
+
+/** Alarm threshold for failure sum metrics. */
+const FAILURE_ALARM_THRESHOLD = 1;
+/** Evaluation periods for failure alarms. */
+const FAILURE_ALARM_EVALUATION_PERIODS = 1;
+/** Metric period for failure alarms. */
+const FAILURE_ALARM_PERIOD = Duration.minutes(5);
+/** Statistic used for failure sum metrics. */
+const FAILURE_ALARM_STATISTIC = 'Sum';
+/** Statistic used for IteratorAge (stream lag). */
+const ITERATOR_AGE_STATISTIC = 'Maximum';
+/** Default IteratorAge threshold: one minute, in milliseconds. */
+const ITERATOR_AGE_DEFAULT_THRESHOLD_MS = 60_000;
+/** CloudWatch namespace for Lambda platform metrics. */
+const LAMBDA_METRIC_NAMESPACE = 'AWS/Lambda';
+/** Default retention when the construct manages the Lambda log group. */
+const DEFAULT_LOG_RETENTION = RetentionDays.ONE_YEAR;
+/** Metric filter value emitted per matching log event. */
+const LOG_METRIC_VALUE = '1';
+/** Default value when no matching log events occur in the period. */
+const LOG_METRIC_DEFAULT_VALUE = 0;
+
+/**
+ * Resolved alarm settings after applying {@link AlarmConfig} defaults.
+ */
+interface ResolvedAlarmConfig {
+  readonly threshold: number;
+  readonly period: Duration;
+  readonly evaluationPeriods: number;
+  readonly treatMissingData: TreatMissingData;
+}
+
+interface MetricAlarmProps {
+  readonly metric: IMetric;
+  readonly threshold: number;
+  readonly evaluationPeriods: number;
+  readonly treatMissingData: TreatMissingData;
+  readonly alarmTopic?: ITopic;
+}
+
+/**
+ * Fills omitted {@link AlarmConfig} fields with construct defaults.
+ *
+ * @param config - Optional caller overrides.
+ * @returns Fully resolved alarm settings.
+ */
+const resolveAlarmConfig = (config?: AlarmConfig): ResolvedAlarmConfig => ({
+  threshold: config?.threshold ?? FAILURE_ALARM_THRESHOLD,
+  period: config?.period ?? FAILURE_ALARM_PERIOD,
+  evaluationPeriods: config?.evaluationPeriods ?? FAILURE_ALARM_EVALUATION_PERIODS,
+  treatMissingData: config?.treatMissingData ?? TreatMissingData.NOT_BREACHING,
+});
+
+/**
+ * Rejects repeated {@link LogFailureFilter.id} values before any child is created.
+ *
+ * Construct ids are `${id}Metric` and `${id}Alarm`, so a repeated id would fail
+ * later with a generic construct-id collision.
+ *
+ * @param filters - Log filters from {@link LambdaFailureDetectorLogProps.filters}.
+ * @throws Error when two filters share the same `id`.
+ */
+const ensureUniqueLogFilterIds = (filters: readonly LogFailureFilter[]): void => {
+  const seen = new Set<string>();
+
+  for (const filter of filters) {
+    if (seen.has(filter.id)) {
+      throw new Error(
+        `Duplicate log filter id "${filter.id}". Each entry in log.filters must have a unique id.`,
+      );
+    }
+
+    seen.add(filter.id);
+  }
+};
+
+/**
+ * Resolves the log group for metric filters, or undefined when none are needed.
+ *
+ * When `filters` is empty, no log group is required. When filters are present
+ * and `group` is omitted, manages `/aws/lambda/<functionName>` with
+ * `retention` (default one year). Does not call `Function.logGroup`, which
+ * would otherwise attach infinite retention.
+ *
+ * @param scope - Parent construct for managed retention resources.
+ * @param lambdaFunction - Function whose default log group name is derived.
+ * @param logGroup - Explicit log group from the caller.
+ * @param logRetention - Retention when the construct manages the log group.
+ * @param logFilters - Log filters that require a log group.
+ * @returns Log group for metric filters, or undefined when unused.
+ * @throws Error when both `log.group` and `log.retention` are set.
+ */
+const resolveLogGroupForFilters = (
+  scope: Construct,
+  lambdaFunction: IFunction,
+  logGroup: ILogGroup | undefined,
+  logRetention: RetentionDays | undefined,
+  logFilters: readonly LogFailureFilter[],
+): ILogGroup | undefined => {
+  if (logGroup && logRetention !== undefined) {
+    throw new Error(
+      'Cannot set both log.group and log.retention. Pass log.group when you manage retention yourself, or omit log.group to let the construct apply log.retention.',
+    );
+  }
+
+  if (logFilters.length === 0) {
+    return undefined;
+  }
+
+  if (logGroup) {
+    return logGroup;
+  }
+
+  const logGroupName = `/aws/lambda/${lambdaFunction.functionName}`;
+  const retention = new LogRetention(scope, 'LogRetention', {
+    logGroupName,
+    retention: logRetention ?? DEFAULT_LOG_RETENTION,
+  });
+
+  return LogGroup.fromLogGroupArn(scope, 'LogGroup', retention.logGroupArn);
+};
+
+/**
+ * Registers an SNS alarm action when a topic is configured.
+ *
+ * @param alarm - Alarm that should notify the topic.
+ * @param alarmTopic - Topic to attach. Omitted topics leave the alarm without an SNS action.
+ */
+const attachAlarmActions = (alarm: Alarm, alarmTopic?: ITopic): void => {
+  if (!alarmTopic) {
+    return;
+  }
+
+  alarm.addAlarmAction(new SnsAction(alarmTopic));
+};
+
+/**
+ * Creates a CloudWatch alarm for a metric at or above the given threshold.
+ *
+ * `aws-cdk-lib` 2.232.0 types `CreateAlarmOptionsBase` as an empty export, so
+ * `evaluationPeriods` and `treatMissingData` are absent from `AlarmProps`.
+ * The alarm construct still forwards both properties to `CfnAlarm`.
+ *
+ * @param scope - Parent construct.
+ * @param id - Construct id.
+ * @param props - Metric, thresholds, and an optional SNS topic.
+ * @returns Configured CloudWatch alarm.
+ */
+const createMetricAlarm = (
+  scope: Construct,
+  id: string,
+  props: MetricAlarmProps,
+): Alarm => {
+  const alarmProps = {
+    metric: props.metric,
+    threshold: props.threshold,
+    comparisonOperator: ComparisonOperator.GREATER_THAN_OR_EQUAL_TO_THRESHOLD,
+    evaluationPeriods: props.evaluationPeriods,
+    treatMissingData: props.treatMissingData,
+  };
+  const alarm = new Alarm(scope, id, alarmProps);
+  attachAlarmActions(alarm, props.alarmTopic);
+  return alarm;
+};
+
+/**
+ * Creates a sum-metric failure alarm using the resolved shared alarm config.
+ *
+ * @param scope - Parent construct.
+ * @param id - Construct id.
+ * @param metric - Sum metric to alarm.
+ * @param alarmConfig - Resolved shared settings.
+ * @param alarmTopic - Optional SNS topic.
+ * @returns Alarm configured for a failure sum.
+ */
+const createSumAlarm = (
+  scope: Construct,
+  id: string,
+  metric: IMetric,
+  alarmConfig: ResolvedAlarmConfig,
+  alarmTopic?: ITopic,
+): Alarm => createMetricAlarm(scope, id, {
+  metric,
+  threshold: alarmConfig.threshold,
+  evaluationPeriods: alarmConfig.evaluationPeriods,
+  treatMissingData: alarmConfig.treatMissingData,
+  alarmTopic,
+});
+
+/**
+ * Builds an `AWS/Lambda` metric for a platform metric name that has no CDK helper.
+ *
+ * @param lambdaFunction - Function whose name is used as the dimension.
+ * @param metricName - Platform metric name (for example `DeadLetterErrors`).
+ * @param period - Metric period.
+ * @param statistic - Aggregation statistic.
+ * @returns CloudWatch metric scoped to the function.
+ */
+const createLambdaPlatformMetric = (
+  lambdaFunction: IFunction,
+  metricName: string,
+  period: Duration,
+  statistic: string,
+): Metric => new Metric({
+  namespace: LAMBDA_METRIC_NAMESPACE,
+  metricName,
+  dimensionsMap: {
+    FunctionName: lambdaFunction.functionName,
+  },
+  period,
+  statistic,
+});
+
+/**
+ * Creates the metric filter and sum alarm for one {@link LogFailureFilter}.
+ *
+ * @param scope - Parent construct.
+ * @param logGroup - Log group the filter reads.
+ * @param filter - Log pattern and custom metric names.
+ * @param alarmConfig - Resolved alarm settings.
+ * @param alarmTopic - Optional topic attached to the alarm.
+ * @returns Filter id and its alarm.
+ */
+const createLogFilterAlarm = (
+  scope: Construct,
+  logGroup: ILogGroup,
+  filter: LogFailureFilter,
+  alarmConfig: ResolvedAlarmConfig,
+  alarmTopic?: ITopic,
+): LogFailureAlarm => {
+  const metricFilter = new MetricFilter(scope, `${filter.id}Metric`, {
+    logGroup,
+    filterPattern: filter.filterPattern,
+    metricNamespace: filter.metricNamespace,
+    metricName: filter.metricName,
+    metricValue: LOG_METRIC_VALUE,
+    defaultValue: LOG_METRIC_DEFAULT_VALUE,
+  });
+  const alarm = createSumAlarm(
+    scope,
+    `${filter.id}Alarm`,
+    metricFilter.metric({
+      period: alarmConfig.period,
+      statistic: FAILURE_ALARM_STATISTIC,
+    }),
+    alarmConfig,
+    alarmTopic,
+  );
+
+  return { id: filter.id, alarm };
+};
+
+/**
+ * Creates opt-in platform metric alarms when the corresponding flags are enabled.
+ *
+ * @param scope - Parent construct.
+ * @param lambdaFunction - Function to monitor.
+ * @param alarmConfig - Resolved shared settings.
+ * @param platformMetrics - Opt-in flags and IteratorAge threshold.
+ * @param alarmTopic - Optional SNS topic.
+ * @returns Created opt-in alarms (undefined when the flag is off).
+ */
+const createOptionalPlatformAlarms = (
+  scope: Construct,
+  lambdaFunction: IFunction,
+  alarmConfig: ResolvedAlarmConfig,
+  platformMetrics: PlatformMetricsOptions | undefined,
+  alarmTopic?: ITopic,
+): {
+  deadLetterErrorsAlarm?: Alarm;
+  destinationDeliveryFailuresAlarm?: Alarm;
+  iteratorAgeAlarm?: Alarm;
+} => {
+  if (!platformMetrics) {
+    return {};
+  }
+
+  let deadLetterErrorsAlarm: Alarm | undefined;
+  if (platformMetrics.deadLetterErrors) {
+    deadLetterErrorsAlarm = createSumAlarm(
+      scope,
+      'LambdaDeadLetterErrorsAlarm',
+      createLambdaPlatformMetric(
+        lambdaFunction,
+        'DeadLetterErrors',
+        alarmConfig.period,
+        FAILURE_ALARM_STATISTIC,
+      ),
+      alarmConfig,
+      alarmTopic,
+    );
+  }
+
+  let destinationDeliveryFailuresAlarm: Alarm | undefined;
+  if (platformMetrics.destinationDeliveryFailures) {
+    destinationDeliveryFailuresAlarm = createSumAlarm(
+      scope,
+      'LambdaDestinationDeliveryFailuresAlarm',
+      createLambdaPlatformMetric(
+        lambdaFunction,
+        'DestinationDeliveryFailures',
+        alarmConfig.period,
+        FAILURE_ALARM_STATISTIC,
+      ),
+      alarmConfig,
+      alarmTopic,
+    );
+  }
+
+  let iteratorAgeAlarm: Alarm | undefined;
+  if (platformMetrics.iteratorAge) {
+    iteratorAgeAlarm = createMetricAlarm(scope, 'LambdaIteratorAgeAlarm', {
+      metric: createLambdaPlatformMetric(
+        lambdaFunction,
+        'IteratorAge',
+        alarmConfig.period,
+        ITERATOR_AGE_STATISTIC,
+      ),
+      threshold: platformMetrics.iteratorAgeThreshold ?? ITERATOR_AGE_DEFAULT_THRESHOLD_MS,
+      evaluationPeriods: alarmConfig.evaluationPeriods,
+      treatMissingData: alarmConfig.treatMissingData,
+      alarmTopic,
+    });
+  }
+
+  return {
+    deadLetterErrorsAlarm,
+    destinationDeliveryFailuresAlarm,
+    iteratorAgeAlarm,
+  };
+};
 
 /**
  * CloudWatch alarm settings for failure metrics.
@@ -39,7 +383,7 @@ export interface AlarmConfig {
    *
    * @default TreatMissingData.NOT_BREACHING
    */
-  readonly treatMissingData?: cloudwatch.TreatMissingData;
+  readonly treatMissingData?: TreatMissingData;
 }
 
 /**
@@ -51,14 +395,19 @@ export interface LogFailureFilter {
   /**
    * Stable id used as the MetricFilter / Alarm construct id prefix
    * (e.g. `InstanceStatusFailure` → `InstanceStatusFailureMetric`).
+   *
+   * Must be unique among {@link LambdaFailureDetectorLogProps.filters}.
    */
   readonly id: string;
   /**
-   * CloudWatch Logs filter pattern string passed to `FilterPattern.literal`.
+   * CloudWatch Logs filter pattern.
    *
-   * @example '"ResourceWaitFailed"'
+   * Pass any {@link IFilterPattern}, including JSON field comparisons
+   * from `FilterPattern`. The pattern is not wrapped again.
+   *
+   * @example FilterPattern.literal('"ResourceWaitFailed"')
    */
-  readonly filterPattern: string;
+  readonly filterPattern: IFilterPattern;
   /** Custom metric namespace for the metric filter. */
   readonly metricNamespace: string;
   /** Custom metric name for the metric filter. */
@@ -104,62 +453,52 @@ export interface PlatformMetricsOptions {
 }
 
 /**
- * Opt-in options for {@link createLambdaFailureDetector}.
- *
- * When {@link LambdaFailureDetection.enabled} is true, alarms are created.
- * {@link LambdaFailureDetection.alarmTopic} is optional; when omitted, alarms have no SNS actions.
- * The construct never creates an SNS topic.
+ * Log group and log-based failure filters for {@link LambdaFailureDetector}.
  */
-export interface LambdaFailureDetection {
-  /**
-   * When true, creates failure detection alarms and log-based metrics.
-   *
-   * @default false when omitted
-   */
-  readonly enabled?: boolean;
-  /**
-   * SNS topic for alarm notifications.
-   *
-   * When omitted, alarms are created without SNS actions.
-   */
-  readonly alarmTopic?: sns.ITopic;
-}
-
-/**
- * Props for {@link LambdaFailureDetector}.
- */
-export interface LambdaFailureDetectorProps {
-  /** Lambda function whose platform failure metrics are alarmed. */
-  readonly lambdaFunction: lambda.IFunction;
+export interface LambdaFailureDetectorLogProps {
   /**
    * Log group used for {@link LogFailureFilter} metric filters.
    *
-   * Required only when you pass {@link LambdaFailureDetectorProps.logFilters}
-   * and want to use an existing group. When omitted with log filters, the
+   * Required only when you pass {@link LambdaFailureDetectorLogProps.filters}
+   * and want to use an existing group. When omitted with filters, the
    * construct manages `/aws/lambda/<functionName>` and applies
-   * {@link LambdaFailureDetectorProps.logRetention}.
+   * {@link LambdaFailureDetectorLogProps.retention}.
    *
-   * Do not set together with {@link LambdaFailureDetectorProps.logRetention}.
+   * Do not set together with {@link LambdaFailureDetectorLogProps.retention}.
    */
-  readonly logGroup?: logs.ILogGroup;
+  readonly group?: ILogGroup;
   /**
    * Retention for the Lambda log group when the construct manages it.
    *
-   * Used when {@link LambdaFailureDetectorProps.logFilters} are set and
-   * {@link LambdaFailureDetectorProps.logGroup} is omitted. Creates a
+   * Used when {@link LambdaFailureDetectorLogProps.filters} are set and
+   * {@link LambdaFailureDetectorLogProps.group} is omitted. Creates a
    * `LogRetention` custom resource for `/aws/lambda/<functionName>`.
    *
-   * Do not set together with {@link LambdaFailureDetectorProps.logGroup}.
+   * Do not set together with {@link LambdaFailureDetectorLogProps.group}.
    *
    * @default RetentionDays.ONE_YEAR
    */
-  readonly logRetention?: logs.RetentionDays;
+  readonly retention?: RetentionDays;
   /**
-   * Optional SNS topic for all alarm actions.
+   * Log-based failure filters. Each entry creates a metric filter and alarm.
+   *
+   * @default no log-based alarms
+   */
+  readonly filters?: LogFailureFilter[];
+}
+
+/**
+ * Shared alarm settings for {@link LambdaFailureDetector}.
+ *
+ * The construct does not create an SNS topic.
+ */
+export interface LambdaFailureDetectorAlarmProps {
+  /**
+   * SNS topic for all alarm actions.
    *
    * When omitted, alarms are created without SNS actions.
    */
-  readonly alarmTopic?: sns.ITopic;
+  readonly topic?: ITopic;
   /**
    * Shared CloudWatch alarm settings for failure alarms.
    *
@@ -169,61 +508,33 @@ export interface LambdaFailureDetectorProps {
    *
    * @default threshold 1, period 5 minutes, evaluationPeriods 1, treatMissingData NOT_BREACHING
    */
-  readonly alarmConfig?: AlarmConfig;
+  readonly config?: AlarmConfig;
   /**
    * Opt-in platform metrics beyond the standard `Errors` and `Throttles` alarms.
    *
    * @default no additional platform metric alarms
    */
   readonly platformMetrics?: PlatformMetricsOptions;
-  /**
-   * Log-based failure filters. Each entry creates a metric filter and alarm.
-   *
-   * @default no log-based alarms
-   */
-  readonly logFilters?: LogFailureFilter[];
 }
 
 /**
- * Props accepted by {@link createLambdaFailureDetector}.
+ * Props for {@link LambdaFailureDetector}.
  */
-export interface CreateLambdaFailureDetectorProps {
-  /** Opt-in options; alarms are created only when {@link LambdaFailureDetection.enabled} is true. */
-  readonly failureDetection?: LambdaFailureDetection;
-  /** Lambda function to monitor. */
-  readonly lambdaFunction: lambda.IFunction;
+export interface LambdaFailureDetectorProps {
+  /** Lambda function whose platform failure metrics are alarmed. */
+  readonly lambdaFunction: IFunction;
   /**
-   * Log group used for log-based filters.
+   * Log group, retention, and log-based failure filters.
    *
-   * Same rules as {@link LambdaFailureDetectorProps.logGroup}.
+   * @default platform alarms only; no log group is managed
    */
-  readonly logGroup?: logs.ILogGroup;
+  readonly log?: LambdaFailureDetectorLogProps;
   /**
-   * Retention for the managed Lambda log group.
+   * SNS topic, shared alarm settings, and opt-in platform metrics.
    *
-   * Same rules as {@link LambdaFailureDetectorProps.logRetention}.
-   *
-   * @default RetentionDays.ONE_YEAR
+   * @default default alarm settings, no SNS actions, no extra platform metrics
    */
-  readonly logRetention?: logs.RetentionDays;
-  /**
-   * Shared CloudWatch alarm settings for failure alarms.
-   *
-   * @default threshold 1, period 5 minutes, evaluationPeriods 1, treatMissingData NOT_BREACHING
-   */
-  readonly alarmConfig?: AlarmConfig;
-  /**
-   * Opt-in platform metrics beyond the standard `Errors` and `Throttles` alarms.
-   *
-   * @default no additional platform metric alarms
-   */
-  readonly platformMetrics?: PlatformMetricsOptions;
-  /**
-   * Log-based failure filters.
-   *
-   * @default no log-based alarms
-   */
-  readonly logFilters?: LogFailureFilter[];
+  readonly alarm?: LambdaFailureDetectorAlarmProps;
 }
 
 /**
@@ -233,326 +544,8 @@ export interface LogFailureAlarm {
   /** Same as {@link LogFailureFilter.id}. */
   readonly id: string;
   /** Alarm on the log metric filter sum. */
-  readonly alarm: cloudwatch.Alarm;
+  readonly alarm: Alarm;
 }
-
-/**
- * Whether {@link LambdaFailureDetection} requests alarm creation.
- *
- * @param failureDetection - Opt-in options from the caller.
- * @returns True only when `enabled` is strictly true.
- */
-export const isLambdaFailureDetectionEnabled = (
-  failureDetection: LambdaFailureDetection,
-): boolean => failureDetection.enabled === true;
-
-/** Alarm threshold for failure sum metrics. */
-const FAILURE_ALARM_THRESHOLD = 1;
-/** Evaluation periods for failure alarms. */
-const FAILURE_ALARM_EVALUATION_PERIODS = 1;
-/** Metric period for failure alarms. */
-const FAILURE_ALARM_PERIOD = Duration.minutes(5);
-/** Statistic used for failure sum metrics. */
-const FAILURE_ALARM_STATISTIC = 'Sum';
-/** Statistic used for IteratorAge (stream lag). */
-const ITERATOR_AGE_STATISTIC = 'Maximum';
-/** Default IteratorAge threshold: one minute, in milliseconds. */
-const ITERATOR_AGE_DEFAULT_THRESHOLD_MS = 60_000;
-/** CloudWatch namespace for Lambda platform metrics. */
-const LAMBDA_METRIC_NAMESPACE = 'AWS/Lambda';
-/** Default retention when the construct manages the Lambda log group. */
-const DEFAULT_LOG_RETENTION = logs.RetentionDays.ONE_YEAR;
-/** Metric filter value emitted per matching log event. */
-const LOG_METRIC_VALUE = '1';
-/** Default value when no matching log events occur in the period. */
-const LOG_METRIC_DEFAULT_VALUE = 0;
-
-/**
- * Resolved alarm settings after applying {@link AlarmConfig} defaults.
- */
-interface ResolvedAlarmConfig {
-  readonly threshold: number;
-  readonly period: Duration;
-  readonly evaluationPeriods: number;
-  readonly treatMissingData: cloudwatch.TreatMissingData;
-}
-
-interface MetricAlarmProps {
-  readonly metric: cloudwatch.IMetric;
-  readonly threshold: number;
-  readonly evaluationPeriods: number;
-  readonly treatMissingData: cloudwatch.TreatMissingData;
-  readonly alarmTopic?: sns.ITopic;
-}
-
-/**
- * Fills omitted {@link AlarmConfig} fields with construct defaults.
- *
- * @param config - Optional caller overrides.
- * @returns Fully resolved alarm settings.
- */
-const resolveAlarmConfig = (config?: AlarmConfig): ResolvedAlarmConfig => ({
-  threshold: config?.threshold ?? FAILURE_ALARM_THRESHOLD,
-  period: config?.period ?? FAILURE_ALARM_PERIOD,
-  evaluationPeriods: config?.evaluationPeriods ?? FAILURE_ALARM_EVALUATION_PERIODS,
-  treatMissingData: config?.treatMissingData ?? cloudwatch.TreatMissingData.NOT_BREACHING,
-});
-
-/**
- * Resolves the log group for metric filters, or undefined when none are needed.
- *
- * When `logFilters` is empty, no log group is required. When filters are present
- * and `logGroup` is omitted, manages `/aws/lambda/<functionName>` with
- * `logRetention` (default one year). Does not call `Function.logGroup`, which
- * would otherwise attach infinite retention.
- *
- * @param scope - Parent construct for managed retention resources.
- * @param lambdaFunction - Function whose default log group name is derived.
- * @param logGroup - Explicit log group from the caller.
- * @param logRetention - Retention when the construct manages the log group.
- * @param logFilters - Log filters that require a log group.
- * @returns Log group for metric filters, or undefined when unused.
- * @throws Error when both `logGroup` and `logRetention` are set.
- */
-const resolveLogGroupForFilters = (
-  scope: Construct,
-  lambdaFunction: lambda.IFunction,
-  logGroup: logs.ILogGroup | undefined,
-  logRetention: logs.RetentionDays | undefined,
-  logFilters: LogFailureFilter[],
-): logs.ILogGroup | undefined => {
-  if (logGroup && logRetention !== undefined) {
-    throw new Error(
-      'Cannot set both logGroup and logRetention. Pass logGroup when you manage retention yourself, or omit logGroup to let the construct apply logRetention.',
-    );
-  }
-
-  if (logFilters.length === 0) {
-    return undefined;
-  }
-
-  if (logGroup) {
-    return logGroup;
-  }
-
-  const logGroupName = `/aws/lambda/${lambdaFunction.functionName}`;
-  const retention = new logs.LogRetention(scope, 'LogRetention', {
-    logGroupName,
-    retention: logRetention ?? DEFAULT_LOG_RETENTION,
-  });
-
-  return logs.LogGroup.fromLogGroupArn(scope, 'LogGroup', retention.logGroupArn);
-};
-
-/**
- * Registers an SNS alarm action when a topic is configured.
- *
- * @param alarm - Alarm that should notify the topic.
- * @param alarmTopic - Topic to attach. Omitted topics leave the alarm without an SNS action.
- */
-const attachAlarmActions = (alarm: cloudwatch.Alarm, alarmTopic?: sns.ITopic): void => {
-  if (!alarmTopic) {
-    return;
-  }
-
-  alarm.addAlarmAction(new cloudwatch_actions.SnsAction(alarmTopic));
-};
-
-/**
- * Creates a CloudWatch alarm for a metric at or above the given threshold.
- *
- * `aws-cdk-lib` 2.232.0 types `CreateAlarmOptionsBase` as an empty export, so
- * `evaluationPeriods` and `treatMissingData` are absent from `AlarmProps`.
- * The alarm construct still forwards both properties to `CfnAlarm`.
- *
- * @param scope - Parent construct.
- * @param id - Construct id.
- * @param props - Metric, thresholds, and an optional SNS topic.
- * @returns Configured CloudWatch alarm.
- */
-const createMetricAlarm = (
-  scope: Construct,
-  id: string,
-  props: MetricAlarmProps,
-): cloudwatch.Alarm => {
-  const alarmProps = {
-    metric: props.metric,
-    threshold: props.threshold,
-    comparisonOperator: cloudwatch.ComparisonOperator.GREATER_THAN_OR_EQUAL_TO_THRESHOLD,
-    evaluationPeriods: props.evaluationPeriods,
-    treatMissingData: props.treatMissingData,
-  };
-  const alarm = new cloudwatch.Alarm(scope, id, alarmProps);
-  attachAlarmActions(alarm, props.alarmTopic);
-  return alarm;
-};
-
-/**
- * Creates a sum-metric failure alarm using the resolved shared alarm config.
- *
- * @param scope - Parent construct.
- * @param id - Construct id.
- * @param metric - Sum metric to alarm.
- * @param alarmConfig - Resolved shared settings.
- * @param alarmTopic - Optional SNS topic.
- * @returns Alarm configured for a failure sum.
- */
-const createSumAlarm = (
-  scope: Construct,
-  id: string,
-  metric: cloudwatch.IMetric,
-  alarmConfig: ResolvedAlarmConfig,
-  alarmTopic?: sns.ITopic,
-): cloudwatch.Alarm => createMetricAlarm(scope, id, {
-  metric,
-  threshold: alarmConfig.threshold,
-  evaluationPeriods: alarmConfig.evaluationPeriods,
-  treatMissingData: alarmConfig.treatMissingData,
-  alarmTopic,
-});
-
-/**
- * Builds an `AWS/Lambda` metric for a platform metric name that has no CDK helper.
- *
- * @param lambdaFunction - Function whose name is used as the dimension.
- * @param metricName - Platform metric name (for example `DeadLetterErrors`).
- * @param period - Metric period.
- * @param statistic - Aggregation statistic.
- * @returns CloudWatch metric scoped to the function.
- */
-const createLambdaPlatformMetric = (
-  lambdaFunction: lambda.IFunction,
-  metricName: string,
-  period: Duration,
-  statistic: string,
-): cloudwatch.Metric => new cloudwatch.Metric({
-  namespace: LAMBDA_METRIC_NAMESPACE,
-  metricName,
-  dimensionsMap: {
-    FunctionName: lambdaFunction.functionName,
-  },
-  period,
-  statistic,
-});
-
-/**
- * Creates the metric filter and sum alarm for one {@link LogFailureFilter}.
- *
- * @param scope - Parent construct.
- * @param logGroup - Log group the filter reads.
- * @param filter - Log pattern and custom metric names.
- * @param alarmConfig - Resolved alarm settings.
- * @param alarmTopic - Optional topic attached to the alarm.
- * @returns Filter id and its alarm.
- */
-const createLogFilterAlarm = (
-  scope: Construct,
-  logGroup: logs.ILogGroup,
-  filter: LogFailureFilter,
-  alarmConfig: ResolvedAlarmConfig,
-  alarmTopic?: sns.ITopic,
-): LogFailureAlarm => {
-  const metricFilter = new logs.MetricFilter(scope, `${filter.id}Metric`, {
-    logGroup,
-    filterPattern: logs.FilterPattern.literal(filter.filterPattern),
-    metricNamespace: filter.metricNamespace,
-    metricName: filter.metricName,
-    metricValue: LOG_METRIC_VALUE,
-    defaultValue: LOG_METRIC_DEFAULT_VALUE,
-  });
-  const alarm = createSumAlarm(
-    scope,
-    `${filter.id}Alarm`,
-    metricFilter.metric({
-      period: alarmConfig.period,
-      statistic: FAILURE_ALARM_STATISTIC,
-    }),
-    alarmConfig,
-    alarmTopic,
-  );
-
-  return { id: filter.id, alarm };
-};
-
-/**
- * Creates opt-in platform metric alarms when the corresponding flags are enabled.
- *
- * @param scope - Parent construct.
- * @param lambdaFunction - Function to monitor.
- * @param alarmConfig - Resolved shared settings.
- * @param platformMetrics - Opt-in flags and IteratorAge threshold.
- * @param alarmTopic - Optional SNS topic.
- * @returns Created opt-in alarms (undefined when the flag is off).
- */
-const createOptionalPlatformAlarms = (
-  scope: Construct,
-  lambdaFunction: lambda.IFunction,
-  alarmConfig: ResolvedAlarmConfig,
-  platformMetrics: PlatformMetricsOptions | undefined,
-  alarmTopic?: sns.ITopic,
-): {
-  deadLetterErrorsAlarm?: cloudwatch.Alarm;
-  destinationDeliveryFailuresAlarm?: cloudwatch.Alarm;
-  iteratorAgeAlarm?: cloudwatch.Alarm;
-} => {
-  if (!platformMetrics) {
-    return {};
-  }
-
-  let deadLetterErrorsAlarm: cloudwatch.Alarm | undefined;
-  if (platformMetrics.deadLetterErrors) {
-    deadLetterErrorsAlarm = createSumAlarm(
-      scope,
-      'LambdaDeadLetterErrorsAlarm',
-      createLambdaPlatformMetric(
-        lambdaFunction,
-        'DeadLetterErrors',
-        alarmConfig.period,
-        FAILURE_ALARM_STATISTIC,
-      ),
-      alarmConfig,
-      alarmTopic,
-    );
-  }
-
-  let destinationDeliveryFailuresAlarm: cloudwatch.Alarm | undefined;
-  if (platformMetrics.destinationDeliveryFailures) {
-    destinationDeliveryFailuresAlarm = createSumAlarm(
-      scope,
-      'LambdaDestinationDeliveryFailuresAlarm',
-      createLambdaPlatformMetric(
-        lambdaFunction,
-        'DestinationDeliveryFailures',
-        alarmConfig.period,
-        FAILURE_ALARM_STATISTIC,
-      ),
-      alarmConfig,
-      alarmTopic,
-    );
-  }
-
-  let iteratorAgeAlarm: cloudwatch.Alarm | undefined;
-  if (platformMetrics.iteratorAge) {
-    iteratorAgeAlarm = createMetricAlarm(scope, 'LambdaIteratorAgeAlarm', {
-      metric: createLambdaPlatformMetric(
-        lambdaFunction,
-        'IteratorAge',
-        alarmConfig.period,
-        ITERATOR_AGE_STATISTIC,
-      ),
-      threshold: platformMetrics.iteratorAgeThreshold ?? ITERATOR_AGE_DEFAULT_THRESHOLD_MS,
-      evaluationPeriods: alarmConfig.evaluationPeriods,
-      treatMissingData: alarmConfig.treatMissingData,
-      alarmTopic,
-    });
-  }
-
-  return {
-    deadLetterErrorsAlarm,
-    destinationDeliveryFailuresAlarm,
-    iteratorAgeAlarm,
-  };
-};
 
 /**
  * CloudWatch failure detection for a Lambda function.
@@ -560,52 +553,54 @@ const createOptionalPlatformAlarms = (
  * Always creates platform `AWS/Lambda` `Errors` and `Throttles` alarms.
  * Optionally creates DeadLetterErrors, DestinationDeliveryFailures, and IteratorAge
  * alarms, plus one metric filter and alarm per {@link LogFailureFilter}.
- * Does not create an SNS topic; pass {@link LambdaFailureDetectorProps.alarmTopic}
+ * Does not create an SNS topic; pass {@link LambdaFailureDetectorAlarmProps.topic}
  * to attach notifications.
  */
 export class LambdaFailureDetector extends Construct {
   /** SNS topic used for alarm actions, when configured. */
-  public readonly alarmTopic?: sns.ITopic;
+  public readonly alarmTopic?: ITopic;
   /**
    * Log group used for log metric filters, when log filters are configured.
    *
    * Undefined when there are no log filters.
    */
-  public readonly logGroup?: logs.ILogGroup;
+  public readonly logGroup?: ILogGroup;
   /** Fires when the Lambda `Errors` metric is non-zero. */
-  public readonly lambdaErrorsAlarm: cloudwatch.Alarm;
+  public readonly lambdaErrorsAlarm: Alarm;
   /** Fires when the Lambda `Throttles` metric is non-zero. */
-  public readonly lambdaThrottlesAlarm: cloudwatch.Alarm;
+  public readonly lambdaThrottlesAlarm: Alarm;
   /** Fires when `DeadLetterErrors` is non-zero, when opted in. */
-  public readonly deadLetterErrorsAlarm?: cloudwatch.Alarm;
+  public readonly deadLetterErrorsAlarm?: Alarm;
   /** Fires when `DestinationDeliveryFailures` is non-zero, when opted in. */
-  public readonly destinationDeliveryFailuresAlarm?: cloudwatch.Alarm;
+  public readonly destinationDeliveryFailuresAlarm?: Alarm;
   /** Fires when stream `IteratorAge` reaches the configured threshold, when opted in. */
-  public readonly iteratorAgeAlarm?: cloudwatch.Alarm;
+  public readonly iteratorAgeAlarm?: Alarm;
   /**
    * Alarms for each log filter, in the same order as
-   * {@link LambdaFailureDetectorProps.logFilters}.
+   * {@link LambdaFailureDetectorLogProps.filters}.
    */
   public readonly logFilterAlarms: LogFailureAlarm[];
 
   /**
    * @param scope - Parent construct.
    * @param id - Construct id.
-   * @param props - Lambda, optional log group / retention, topic, alarm config, platform metrics, and log filters.
-   * @throws Error when both `logGroup` and `logRetention` are set.
+   * @param props - Lambda, optional log group / retention / filters, and alarm settings.
+   * @throws Error when both `log.group` and `log.retention` are set.
+   * @throws Error when `log.filters` contains a duplicate `id`.
    */
   constructor(scope: Construct, id: string, props: LambdaFailureDetectorProps) {
     super(scope, id);
 
-    const alarmTopic = props.alarmTopic;
+    const alarmTopic = props.alarm?.topic;
     this.alarmTopic = alarmTopic;
-    const alarmConfig = resolveAlarmConfig(props.alarmConfig);
-    const logFilters = props.logFilters ?? [];
+    const alarmConfig = resolveAlarmConfig(props.alarm?.config);
+    const logFilters = props.log?.filters ?? [];
+    ensureUniqueLogFilterIds(logFilters);
     const logGroup = resolveLogGroupForFilters(
       this,
       props.lambdaFunction,
-      props.logGroup,
-      props.logRetention,
+      props.log?.group,
+      props.log?.retention,
       logFilters,
     );
     this.logGroup = logGroup;
@@ -636,7 +631,7 @@ export class LambdaFailureDetector extends Construct {
       this,
       props.lambdaFunction,
       alarmConfig,
-      props.platformMetrics,
+      props.alarm?.platformMetrics,
       alarmTopic,
     );
     this.deadLetterErrorsAlarm = optionalAlarms.deadLetterErrorsAlarm;
@@ -661,42 +656,9 @@ export class LambdaFailureDetector extends Construct {
    * Returns the log-filter alarm for the given filter id, or undefined when missing.
    *
    * @param id - Same as {@link LogFailureFilter.id}.
-   * @returns Matching alarm, or undefined when the id was not in `logFilters`.
+   * @returns Matching alarm, or undefined when the id was not in `log.filters`.
    */
-  public findLogFilterAlarm(id: string): cloudwatch.Alarm | undefined {
+  public findLogFilterAlarm(id: string): Alarm | undefined {
     return this.logFilterAlarms.find((entry) => entry.id === id)?.alarm;
   }
 }
-
-/**
- * Creates a {@link LambdaFailureDetector} when failure detection is enabled.
- *
- * @param scope - Parent construct.
- * @param id - Construct id.
- * @param props - Lambda, optional log group / retention, opt-in options, alarm config, platform metrics, and log filters.
- * @returns Detector construct, or undefined when disabled.
- */
-export const createLambdaFailureDetector = (
-  scope: Construct,
-  id: string,
-  props: CreateLambdaFailureDetectorProps,
-): LambdaFailureDetector | undefined => {
-  const failureDetection = props.failureDetection;
-  if (!failureDetection) {
-    return undefined;
-  }
-
-  if (!isLambdaFailureDetectionEnabled(failureDetection)) {
-    return undefined;
-  }
-
-  return new LambdaFailureDetector(scope, id, {
-    lambdaFunction: props.lambdaFunction,
-    logGroup: props.logGroup,
-    logRetention: props.logRetention,
-    alarmTopic: failureDetection.alarmTopic,
-    alarmConfig: props.alarmConfig,
-    platformMetrics: props.platformMetrics,
-    logFilters: props.logFilters,
-  });
-};

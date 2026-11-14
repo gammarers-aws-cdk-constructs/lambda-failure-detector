@@ -1,12 +1,12 @@
 import { App, Duration, Stack } from 'aws-cdk-lib';
 import { Template } from 'aws-cdk-lib/assertions';
-import * as cloudwatch from 'aws-cdk-lib/aws-cloudwatch';
-import * as lambda from 'aws-cdk-lib/aws-lambda';
-import * as logs from 'aws-cdk-lib/aws-logs';
-import * as sns from 'aws-cdk-lib/aws-sns';
+import { TreatMissingData } from 'aws-cdk-lib/aws-cloudwatch';
+import { Code, Function, Runtime } from 'aws-cdk-lib/aws-lambda';
+import { FilterPattern, LogGroup, RetentionDays } from 'aws-cdk-lib/aws-logs';
+import { Topic } from 'aws-cdk-lib/aws-sns';
 import {
-  createLambdaFailureDetector,
   LambdaFailureDetector,
+  type LambdaFailureDetectorProps,
   type LogFailureFilter,
 } from '../src';
 
@@ -21,26 +21,26 @@ const EXPECTED_ITERATOR_AGE_THRESHOLD_MS = 60_000;
 
 const RESOURCE_WAIT_FAILED: LogFailureFilter = {
   id: 'ResourceWaitFailed',
-  filterPattern: '"ResourceWaitFailed"',
+  filterPattern: FilterPattern.literal('"ResourceWaitFailed"'),
   metricNamespace: 'App/Lambda',
   metricName: 'ResourceWaitFailed',
 };
 
 interface DetectorFixture {
   readonly stack: Stack;
-  readonly fn: lambda.Function;
-  readonly logGroup: logs.LogGroup;
+  readonly fn: Function;
+  readonly logGroup: LogGroup;
 }
 
 const createFixture = (): DetectorFixture => {
   const app = new App();
   const stack = new Stack(app, 'TestStack');
-  const fn = new lambda.Function(stack, 'Fn', {
-    runtime: lambda.Runtime.NODEJS_20_X,
+  const fn = new Function(stack, 'Fn', {
+    runtime: Runtime.NODEJS_20_X,
     handler: 'index.handler',
-    code: lambda.Code.fromInline('exports.handler = async () => undefined;'),
+    code: Code.fromInline('exports.handler = async () => undefined;'),
   });
-  const logGroup = new logs.LogGroup(stack, 'Logs');
+  const logGroup = new LogGroup(stack, 'Logs');
 
   return { stack, fn, logGroup };
 };
@@ -117,19 +117,23 @@ describe('LambdaFailureDetector', () => {
 
   it('creates one metric filter alarm per log filter and notifies the given topic', () => {
     const { stack, fn, logGroup } = createFixture();
-    const topic = new sns.Topic(stack, 'Alarms');
+    const topic = new Topic(stack, 'Alarms');
 
     const detector = new LambdaFailureDetector(stack, 'Detector', {
       lambdaFunction: fn,
-      logGroup,
-      alarmTopic: topic,
-      logFilters: [RESOURCE_WAIT_FAILED],
+      log: {
+        group: logGroup,
+        filters: [RESOURCE_WAIT_FAILED],
+      },
+      alarm: {
+        topic,
+      },
     });
 
     const template = Template.fromStack(stack);
     expectFailureAlarmShape(template, 3);
     template.hasResourceProperties('AWS::Logs::MetricFilter', {
-      FilterPattern: RESOURCE_WAIT_FAILED.filterPattern,
+      FilterPattern: RESOURCE_WAIT_FAILED.filterPattern.logPatternString,
       MetricTransformations: [
         {
           MetricNamespace: RESOURCE_WAIT_FAILED.metricNamespace,
@@ -153,12 +157,56 @@ describe('LambdaFailureDetector', () => {
     }
   });
 
-  it('manages the Lambda log group with one-year retention when logFilters omit logGroup', () => {
+  it('passes a JSON field filter pattern through without wrapping it', () => {
+    const { stack, fn, logGroup } = createFixture();
+    const levelError = FilterPattern.stringValue('$.level', '=', 'ERROR');
+
+    new LambdaFailureDetector(stack, 'Detector', {
+      lambdaFunction: fn,
+      log: {
+        group: logGroup,
+        filters: [
+          {
+            id: 'LevelError',
+            filterPattern: levelError,
+            metricNamespace: 'App/Lambda',
+            metricName: 'LevelError',
+          },
+        ],
+      },
+    });
+
+    Template.fromStack(stack).hasResourceProperties('AWS::Logs::MetricFilter', {
+      FilterPattern: levelError.logPatternString,
+    });
+  });
+
+  it('throws when log filter ids are duplicated', () => {
+    const { stack, fn, logGroup } = createFixture();
+
+    expect(() => new LambdaFailureDetector(stack, 'Detector', {
+      lambdaFunction: fn,
+      log: {
+        group: logGroup,
+        filters: [
+          RESOURCE_WAIT_FAILED,
+          {
+            ...RESOURCE_WAIT_FAILED,
+            metricName: 'ResourceWaitFailedAgain',
+          },
+        ],
+      },
+    })).toThrow(/Duplicate log filter id "ResourceWaitFailed"/);
+  });
+
+  it('manages the Lambda log group with one-year retention when filters omit group', () => {
     const { stack, fn } = createFixture();
 
     const detector = new LambdaFailureDetector(stack, 'Detector', {
       lambdaFunction: fn,
-      logFilters: [RESOURCE_WAIT_FAILED],
+      log: {
+        filters: [RESOURCE_WAIT_FAILED],
+      },
     });
 
     const template = Template.fromStack(stack);
@@ -170,13 +218,15 @@ describe('LambdaFailureDetector', () => {
     expect(detector.logGroup).toBeDefined();
   });
 
-  it('applies a custom logRetention when managing the Lambda log group', () => {
+  it('applies a custom retention when managing the Lambda log group', () => {
     const { stack, fn } = createFixture();
 
     new LambdaFailureDetector(stack, 'Detector', {
       lambdaFunction: fn,
-      logRetention: logs.RetentionDays.THREE_MONTHS,
-      logFilters: [RESOURCE_WAIT_FAILED],
+      log: {
+        retention: RetentionDays.THREE_MONTHS,
+        filters: [RESOURCE_WAIT_FAILED],
+      },
     });
 
     Template.fromStack(stack).hasResourceProperties('Custom::LogRetention', {
@@ -184,29 +234,35 @@ describe('LambdaFailureDetector', () => {
     });
   });
 
-  it('throws when both logGroup and logRetention are set', () => {
+  it('throws when both log.group and log.retention are set', () => {
     const { stack, fn, logGroup } = createFixture();
 
     expect(() => new LambdaFailureDetector(stack, 'Detector', {
       lambdaFunction: fn,
-      logGroup,
-      logRetention: logs.RetentionDays.ONE_YEAR,
-      logFilters: [RESOURCE_WAIT_FAILED],
-    })).toThrow(/Cannot set both logGroup and logRetention/);
+      log: {
+        group: logGroup,
+        retention: RetentionDays.ONE_YEAR,
+        filters: [RESOURCE_WAIT_FAILED],
+      },
+    })).toThrow(/Cannot set both log\.group and log\.retention/);
   });
 
-  it('applies alarmConfig to every failure sum alarm', () => {
+  it('applies alarm.config to every failure sum alarm', () => {
     const { stack, fn, logGroup } = createFixture();
 
     new LambdaFailureDetector(stack, 'Detector', {
       lambdaFunction: fn,
-      logGroup,
-      logFilters: [RESOURCE_WAIT_FAILED],
-      alarmConfig: {
-        threshold: 3,
-        period: Duration.minutes(1),
-        evaluationPeriods: 2,
-        treatMissingData: cloudwatch.TreatMissingData.BREACHING,
+      log: {
+        group: logGroup,
+        filters: [RESOURCE_WAIT_FAILED],
+      },
+      alarm: {
+        config: {
+          threshold: 3,
+          period: Duration.minutes(1),
+          evaluationPeriods: 2,
+          treatMissingData: TreatMissingData.BREACHING,
+        },
       },
     });
 
@@ -223,11 +279,13 @@ describe('LambdaFailureDetector', () => {
 
     const detector = new LambdaFailureDetector(stack, 'Detector', {
       lambdaFunction: fn,
-      platformMetrics: {
-        deadLetterErrors: true,
-        destinationDeliveryFailures: true,
-        iteratorAge: true,
-        iteratorAgeThreshold: 120_000,
+      alarm: {
+        platformMetrics: {
+          deadLetterErrors: true,
+          destinationDeliveryFailures: true,
+          iteratorAge: true,
+          iteratorAgeThreshold: 120_000,
+        },
       },
     });
 
@@ -262,8 +320,10 @@ describe('LambdaFailureDetector', () => {
 
     new LambdaFailureDetector(stack, 'Detector', {
       lambdaFunction: fn,
-      platformMetrics: {
-        iteratorAge: true,
+      alarm: {
+        platformMetrics: {
+          iteratorAge: true,
+        },
       },
     });
 
@@ -274,52 +334,82 @@ describe('LambdaFailureDetector', () => {
   });
 });
 
-describe('createLambdaFailureDetector', () => {
-  it('returns undefined and creates no alarm when failure detection is omitted', () => {
-    const { stack, fn } = createFixture();
+interface SynthesisSnapshotCase {
+  readonly name: string;
+  readonly createProps: (fixture: DetectorFixture) => LambdaFailureDetectorProps;
+}
 
-    const detector = createLambdaFailureDetector(stack, 'Detector', {
+/** Representative public prop combinations pinned by synthesis snapshots. */
+const SYNTHESIS_SNAPSHOT_CASES: readonly SynthesisSnapshotCase[] = [
+  {
+    name: 'defaults',
+    createProps: ({ fn }) => ({
       lambdaFunction: fn,
-    });
-
-    expect(detector).toBeUndefined();
-    Template.fromStack(stack).resourceCountIs('AWS::CloudWatch::Alarm', 0);
-  });
-
-  it('returns undefined when failure detection is disabled', () => {
-    const { stack, fn } = createFixture();
-
-    const detector = createLambdaFailureDetector(stack, 'Detector', {
-      failureDetection: { enabled: false },
+    }),
+  },
+  {
+    name: 'custom alarm config',
+    createProps: ({ fn }) => ({
       lambdaFunction: fn,
-      logFilters: [RESOURCE_WAIT_FAILED],
-    });
-
-    expect(detector).toBeUndefined();
-    Template.fromStack(stack).resourceCountIs('AWS::CloudWatch::Alarm', 0);
-    Template.fromStack(stack).resourceCountIs('AWS::Logs::MetricFilter', 0);
-  });
-
-  it('creates the detector when failure detection is enabled', () => {
-    const { stack, fn } = createFixture();
-
-    const detector = createLambdaFailureDetector(stack, 'Detector', {
-      failureDetection: { enabled: true },
-      lambdaFunction: fn,
-      logFilters: [RESOURCE_WAIT_FAILED],
-      platformMetrics: {
-        deadLetterErrors: true,
+      alarm: {
+        config: {
+          threshold: 3,
+          period: Duration.minutes(1),
+          evaluationPeriods: 2,
+          treatMissingData: TreatMissingData.BREACHING,
+        },
       },
-    });
+    }),
+  },
+  {
+    name: 'existing topic',
+    createProps: ({ stack, fn }) => ({
+      lambdaFunction: fn,
+      alarm: {
+        topic: new Topic(stack, 'Alarms'),
+      },
+    }),
+  },
+  {
+    name: 'log filters on an existing log group',
+    createProps: ({ fn, logGroup }) => ({
+      lambdaFunction: fn,
+      log: {
+        group: logGroup,
+        filters: [RESOURCE_WAIT_FAILED],
+      },
+    }),
+  },
+  {
+    name: 'managed log retention',
+    createProps: ({ fn }) => ({
+      lambdaFunction: fn,
+      log: {
+        retention: RetentionDays.THREE_MONTHS,
+        filters: [RESOURCE_WAIT_FAILED],
+      },
+    }),
+  },
+  {
+    name: 'platform metrics',
+    createProps: ({ fn }) => ({
+      lambdaFunction: fn,
+      alarm: {
+        platformMetrics: {
+          deadLetterErrors: true,
+          destinationDeliveryFailures: true,
+          iteratorAge: true,
+          iteratorAgeThreshold: 120_000,
+        },
+      },
+    }),
+  },
+];
 
-    expect(detector).toBeInstanceOf(LambdaFailureDetector);
-    expect(detector?.findLogFilterAlarm(RESOURCE_WAIT_FAILED.id)).toBeDefined();
-    expect(detector?.deadLetterErrorsAlarm).toBeDefined();
-    expect(detector?.logGroup).toBeDefined();
-    // Errors + Throttles + DeadLetterErrors + one log filter
-    Template.fromStack(stack).resourceCountIs('AWS::CloudWatch::Alarm', 4);
-    Template.fromStack(stack).hasResourceProperties('Custom::LogRetention', {
-      RetentionInDays: 365,
-    });
+describe('LambdaFailureDetector synthesis snapshots', () => {
+  it.each(SYNTHESIS_SNAPSHOT_CASES)('$name', ({ createProps }) => {
+    const fixture = createFixture();
+    new LambdaFailureDetector(fixture.stack, 'Detector', createProps(fixture));
+    expect(Template.fromStack(fixture.stack).toJSON()).toMatchSnapshot();
   });
 });
