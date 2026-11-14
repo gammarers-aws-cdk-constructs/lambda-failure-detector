@@ -6,6 +6,7 @@ import { FilterPattern, LogGroup, RetentionDays } from 'aws-cdk-lib/aws-logs';
 import { Topic } from 'aws-cdk-lib/aws-sns';
 import {
   LambdaFailureDetector,
+  type LambdaFailureDetectorProps,
   type LogFailureFilter,
 } from '../src';
 
@@ -330,5 +331,85 @@ describe('LambdaFailureDetector', () => {
     expect(findAlarmByMetricName(template, 'IteratorAge').Threshold).toBe(
       EXPECTED_ITERATOR_AGE_THRESHOLD_MS,
     );
+  });
+});
+
+interface SynthesisSnapshotCase {
+  readonly name: string;
+  readonly createProps: (fixture: DetectorFixture) => LambdaFailureDetectorProps;
+}
+
+/** Representative public prop combinations pinned by synthesis snapshots. */
+const SYNTHESIS_SNAPSHOT_CASES: readonly SynthesisSnapshotCase[] = [
+  {
+    name: 'defaults',
+    createProps: ({ fn }) => ({
+      lambdaFunction: fn,
+    }),
+  },
+  {
+    name: 'custom alarm config',
+    createProps: ({ fn }) => ({
+      lambdaFunction: fn,
+      alarm: {
+        config: {
+          threshold: 3,
+          period: Duration.minutes(1),
+          evaluationPeriods: 2,
+          treatMissingData: TreatMissingData.BREACHING,
+        },
+      },
+    }),
+  },
+  {
+    name: 'existing topic',
+    createProps: ({ stack, fn }) => ({
+      lambdaFunction: fn,
+      alarm: {
+        topic: new Topic(stack, 'Alarms'),
+      },
+    }),
+  },
+  {
+    name: 'log filters on an existing log group',
+    createProps: ({ fn, logGroup }) => ({
+      lambdaFunction: fn,
+      log: {
+        group: logGroup,
+        filters: [RESOURCE_WAIT_FAILED],
+      },
+    }),
+  },
+  {
+    name: 'managed log retention',
+    createProps: ({ fn }) => ({
+      lambdaFunction: fn,
+      log: {
+        retention: RetentionDays.THREE_MONTHS,
+        filters: [RESOURCE_WAIT_FAILED],
+      },
+    }),
+  },
+  {
+    name: 'platform metrics',
+    createProps: ({ fn }) => ({
+      lambdaFunction: fn,
+      alarm: {
+        platformMetrics: {
+          deadLetterErrors: true,
+          destinationDeliveryFailures: true,
+          iteratorAge: true,
+          iteratorAgeThreshold: 120_000,
+        },
+      },
+    }),
+  },
+];
+
+describe('LambdaFailureDetector synthesis snapshots', () => {
+  it.each(SYNTHESIS_SNAPSHOT_CASES)('$name', ({ createProps }) => {
+    const fixture = createFixture();
+    new LambdaFailureDetector(fixture.stack, 'Detector', createProps(fixture));
+    expect(Template.fromStack(fixture.stack).toJSON()).toMatchSnapshot();
   });
 });
