@@ -4,6 +4,8 @@
 
 ### LambdaFailureDetector <a name="LambdaFailureDetector" id="lambda-failure-detector.LambdaFailureDetector"></a>
 
+- *Implements:* constructs.IConstruct, constructs.IDependable
+
 CloudWatch failure detection for a Lambda function.
 
 Always creates platform `AWS/Lambda` `Errors` and `Throttles` alarms.
