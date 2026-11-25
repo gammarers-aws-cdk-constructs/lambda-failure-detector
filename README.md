@@ -21,11 +21,11 @@ Creates Amazon CloudWatch alarms for an AWS Lambda function. The construct alarm
 
 1. You pass a Lambda function. Pass `logGroup` only when you supply `logFailureFilters`. The construct does not create a log group and does not set retention.
 2. The construct creates CloudWatch alarms on the `AWS/Lambda` `Errors` and `Throttles` metrics. By default, missing data does not breach, so a quiet schedule stays quiet between runs.
-3. When you enable entries in `alarm.platformMetrics`, the construct adds matching platform alarms (`DeadLetterErrors`, `DestinationDeliveryFailures`, and/or `IteratorAge`).
+3. When you enable entries in `platformMetrics`, the construct adds matching platform alarms (`DeadLetterErrors`, `DestinationDeliveryFailures`, and/or `IteratorAge`).
 4. For each entry in `logFailureFilters`, the construct adds a metric filter on `logGroup` and an alarm on the filter's sum. Omitting `logGroup` when filters are set fails synthesis. Each filter `id` must be unique; a duplicate fails synthesis.
-5. When you pass `alarm.config`, failure sum alarms use those settings. Defaults are threshold 1, period 5 minutes, evaluationPeriods 1, and treatMissingData `NOT_BREACHING`.
-6. IteratorAge uses the same period and evaluation settings from `alarm.config`, but its threshold comes from `alarm.platformMetrics.iteratorAgeThreshold` (default 60000 ms).
-7. When you pass `alarm.topic`, every alarm notifies that topic. When you omit the topic, the alarms remain and have no SNS action. The construct does not create a topic.
+5. When you pass `alarmConfig`, failure sum alarms use those settings. Defaults are threshold 1, period 5 minutes, evaluationPeriods 1, and treatMissingData `NOT_BREACHING`.
+6. IteratorAge uses the same period and evaluation settings from `alarmConfig`, but its threshold comes from `platformMetrics.iteratorAgeThreshold` (default 60000 ms).
+7. When you pass `topic`, every alarm, including log failure filters, notifies that topic. When you omit the topic, the alarms remain and have no SNS action. The construct does not create a topic.
 
 ## Installation
 
@@ -90,7 +90,7 @@ Deploy checklist:
 1. Install this package and peers (`aws-cdk-lib`, `constructs`) in your CDK app.
 2. From the CDK app: `npx cdk deploy ExampleStack`
 
-To alarm on a log line and notify an existing topic, pass `logGroup`, `logFailureFilters`, and `alarm.topic`. Create the log group yourself and set its retention there. Omitting `logGroup` when `logFailureFilters` is set fails synthesis. Pass `alarm.config` when the default threshold or evaluation window needs tuning. Create the construct only when failure detection should be on.
+To alarm on a log line and notify an existing topic, pass `topic`, `logGroup`, and `logFailureFilters`. Create the log group yourself and set its retention there. Omitting `logGroup` when `logFailureFilters` is set fails synthesis. Pass `alarmConfig` when the default threshold or evaluation window needs tuning. Create the construct only when failure detection should be on.
 
 ```ts
 import { Duration } from 'aws-cdk-lib';
@@ -105,6 +105,7 @@ declare const logGroup: ILogGroup;
 declare const topic: ITopic;
 
 new LambdaFailureDetector(this, 'FailureDetector', {
+  topic,
   lambdaFunction: fn,
   logGroup,
   logFailureFilters: [
@@ -121,14 +122,11 @@ new LambdaFailureDetector(this, 'FailureDetector', {
       metricName: 'LevelError',
     },
   ],
-  alarm: {
-    topic,
-    config: {
-      threshold: 3,
-      period: Duration.minutes(1),
-      evaluationPeriods: 2,
-      treatMissingData: TreatMissingData.BREACHING,
-    },
+  alarmConfig: {
+    threshold: 3,
+    period: Duration.minutes(1),
+    evaluationPeriods: 2,
+    treatMissingData: TreatMissingData.BREACHING,
   },
 });
 ```
@@ -139,17 +137,11 @@ new LambdaFailureDetector(this, 'FailureDetector', {
 
 | Property | Type | Required | Description |
 | --- | --- | --- | --- |
+| `topic` | `sns.ITopic` | no | SNS topic for every alarm action, including log failure filters. When omitted, alarms have no SNS actions. |
 | `lambdaFunction` | `lambda.IFunction` | yes | Lambda function whose platform failure metrics are alarmed. |
 | `logGroup` | `logs.ILogGroup` | no | Log group for `logFailureFilters`. Required when `logFailureFilters` is non-empty. The construct does not create a log group or set retention. |
 | `logFailureFilters` | `LogFailureFilter[]` | no | Log-based failure filters. Default: no log-based alarms. Each `id` must be unique. |
-| `alarm` | `LambdaFailureDetectorAlarmProps` | no | SNS topic, shared alarm settings, and opt-in platform metrics. |
-
-### LambdaFailureDetectorAlarmProps
-
-| Property | Type | Required | Description |
-| --- | --- | --- | --- |
-| `topic` | `sns.ITopic` | no | SNS topic for every alarm action. When omitted, alarms have no SNS actions. |
-| `config` | `AlarmConfig` | no | Shared settings for failure alarms. Default: threshold 1, period 5 minutes, evaluationPeriods 1, treatMissingData `NOT_BREACHING`. |
+| `alarmConfig` | `AlarmConfig` | no | Shared settings for failure alarms. Default: threshold 1, period 5 minutes, evaluationPeriods 1, treatMissingData `NOT_BREACHING`. |
 | `platformMetrics` | `PlatformMetricsOptions` | no | Opt-in platform metrics beyond `Errors` and `Throttles`. Default: no additional platform metric alarms. |
 
 ### AlarmConfig

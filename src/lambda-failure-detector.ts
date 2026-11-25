@@ -426,39 +426,16 @@ export interface PlatformMetricsOptions {
 }
 
 /**
- * Shared alarm settings for {@link LambdaFailureDetector}.
- *
- * The construct does not create an SNS topic.
- */
-export interface LambdaFailureDetectorAlarmProps {
-  /**
-   * SNS topic for all alarm actions.
-   *
-   * When omitted, alarms are created without SNS actions.
-   */
-  readonly topic?: ITopic;
-  /**
-   * Shared CloudWatch alarm settings for failure alarms.
-   *
-   * Applies to sum metrics (`Errors`, `Throttles`, opt-in counts, and log filters).
-   * IteratorAge uses `period` / `evaluationPeriods` / `treatMissingData` from this
-   * config, but its threshold comes from {@link PlatformMetricsOptions.iteratorAgeThreshold}.
-   *
-   * @default threshold 1, period 5 minutes, evaluationPeriods 1, treatMissingData NOT_BREACHING
-   */
-  readonly config?: AlarmConfig;
-  /**
-   * Opt-in platform metrics beyond the standard `Errors` and `Throttles` alarms.
-   *
-   * @default no additional platform metric alarms
-   */
-  readonly platformMetrics?: PlatformMetricsOptions;
-}
-
-/**
  * Props for {@link LambdaFailureDetector}.
  */
 export interface LambdaFailureDetectorProps {
+  /**
+   * SNS topic for every alarm action, including log failure filters.
+   *
+   * When omitted, alarms are created without SNS actions.
+   * The construct does not create a topic.
+   */
+  readonly topic?: ITopic;
   /** Lambda function whose platform failure metrics are alarmed. */
   readonly lambdaFunction: IFunction;
   /**
@@ -477,11 +454,21 @@ export interface LambdaFailureDetectorProps {
    */
   readonly logFailureFilters?: LogFailureFilter[];
   /**
-   * SNS topic, shared alarm settings, and opt-in platform metrics.
+   * Shared CloudWatch alarm settings for failure alarms.
    *
-   * @default default alarm settings, no SNS actions, no extra platform metrics
+   * Applies to sum metrics (`Errors`, `Throttles`, opt-in counts, and log filters).
+   * IteratorAge uses `period` / `evaluationPeriods` / `treatMissingData` from this
+   * config, but its threshold comes from {@link PlatformMetricsOptions.iteratorAgeThreshold}.
+   *
+   * @default threshold 1, period 5 minutes, evaluationPeriods 1, treatMissingData NOT_BREACHING
    */
-  readonly alarm?: LambdaFailureDetectorAlarmProps;
+  readonly alarmConfig?: AlarmConfig;
+  /**
+   * Opt-in platform metrics beyond the standard `Errors` and `Throttles` alarms.
+   *
+   * @default no additional platform metric alarms
+   */
+  readonly platformMetrics?: PlatformMetricsOptions;
 }
 
 /**
@@ -501,7 +488,7 @@ export interface LogFailureAlarm {
  * Optionally creates DeadLetterErrors, DestinationDeliveryFailures, and IteratorAge
  * alarms, plus one metric filter and alarm per {@link LogFailureFilter}.
  * Does not create a log group or set its retention. Does not create an SNS topic;
- * pass {@link LambdaFailureDetectorAlarmProps.topic} to attach notifications.
+ * pass {@link LambdaFailureDetectorProps.topic} to attach notifications.
  */
 export class LambdaFailureDetector extends Construct {
   /** SNS topic used for alarm actions, when configured. */
@@ -531,16 +518,16 @@ export class LambdaFailureDetector extends Construct {
   /**
    * @param scope - Parent construct.
    * @param id - Construct id.
-   * @param props - Lambda function, optional log group and log filters, and alarm settings.
+   * @param props - SNS topic, Lambda function, optional log group and log filters, and alarm settings.
    * @throws Error when `logFailureFilters` is non-empty and `logGroup` is omitted.
    * @throws Error when `logFailureFilters` contains a duplicate `id`.
    */
   constructor(scope: Construct, id: string, props: LambdaFailureDetectorProps) {
     super(scope, id);
 
-    const alarmTopic = props.alarm?.topic;
+    const alarmTopic = props.topic;
     this.alarmTopic = alarmTopic;
-    const alarmConfig = resolveAlarmConfig(props.alarm?.config);
+    const alarmConfig = resolveAlarmConfig(props.alarmConfig);
     const logFilters = props.logFailureFilters ?? [];
     ensureUniqueLogFilterIds(logFilters);
     const logGroup = requireLogGroupForFilters(props.logGroup, logFilters);
@@ -572,7 +559,7 @@ export class LambdaFailureDetector extends Construct {
       this,
       props.lambdaFunction,
       alarmConfig,
-      props.alarm?.platformMetrics,
+      props.platformMetrics,
       alarmTopic,
     );
     this.deadLetterErrorsAlarm = optionalAlarms.deadLetterErrorsAlarm;

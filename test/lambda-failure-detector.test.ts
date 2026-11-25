@@ -120,12 +120,10 @@ describe('LambdaFailureDetector', () => {
     const topic = new Topic(stack, 'Alarms');
 
     const detector = new LambdaFailureDetector(stack, 'Detector', {
+      topic,
       lambdaFunction: fn,
       logGroup,
       logFailureFilters: [RESOURCE_WAIT_FAILED],
-      alarm: {
-        topic,
-      },
     });
 
     const template = Template.fromStack(stack);
@@ -218,20 +216,18 @@ describe('LambdaFailureDetector', () => {
     expect(detector.logFilterAlarms).toEqual([]);
   });
 
-  it('applies alarm.config to every failure sum alarm', () => {
+  it('applies alarmConfig to every failure sum alarm', () => {
     const { stack, fn, logGroup } = createFixture();
 
     new LambdaFailureDetector(stack, 'Detector', {
       lambdaFunction: fn,
       logGroup,
       logFailureFilters: [RESOURCE_WAIT_FAILED],
-      alarm: {
-        config: {
-          threshold: 3,
-          period: Duration.minutes(1),
-          evaluationPeriods: 2,
-          treatMissingData: TreatMissingData.BREACHING,
-        },
+      alarmConfig: {
+        threshold: 3,
+        period: Duration.minutes(1),
+        evaluationPeriods: 2,
+        treatMissingData: TreatMissingData.BREACHING,
       },
     });
 
@@ -248,13 +244,11 @@ describe('LambdaFailureDetector', () => {
 
     const detector = new LambdaFailureDetector(stack, 'Detector', {
       lambdaFunction: fn,
-      alarm: {
-        platformMetrics: {
-          deadLetterErrors: true,
-          destinationDeliveryFailures: true,
-          iteratorAge: true,
-          iteratorAgeThreshold: 120_000,
-        },
+      platformMetrics: {
+        deadLetterErrors: true,
+        destinationDeliveryFailures: true,
+        iteratorAge: true,
+        iteratorAgeThreshold: 120_000,
       },
     });
 
@@ -289,10 +283,8 @@ describe('LambdaFailureDetector', () => {
 
     new LambdaFailureDetector(stack, 'Detector', {
       lambdaFunction: fn,
-      alarm: {
-        platformMetrics: {
-          iteratorAge: true,
-        },
+      platformMetrics: {
+        iteratorAge: true,
       },
     });
 
@@ -320,23 +312,19 @@ const SYNTHESIS_SNAPSHOT_CASES: readonly SynthesisSnapshotCase[] = [
     name: 'custom alarm config',
     createProps: ({ fn }) => ({
       lambdaFunction: fn,
-      alarm: {
-        config: {
-          threshold: 3,
-          period: Duration.minutes(1),
-          evaluationPeriods: 2,
-          treatMissingData: TreatMissingData.BREACHING,
-        },
+      alarmConfig: {
+        threshold: 3,
+        period: Duration.minutes(1),
+        evaluationPeriods: 2,
+        treatMissingData: TreatMissingData.BREACHING,
       },
     }),
   },
   {
     name: 'existing topic',
     createProps: ({ stack, fn }) => ({
+      topic: new Topic(stack, 'Alarms'),
       lambdaFunction: fn,
-      alarm: {
-        topic: new Topic(stack, 'Alarms'),
-      },
     }),
   },
   {
@@ -351,13 +339,11 @@ const SYNTHESIS_SNAPSHOT_CASES: readonly SynthesisSnapshotCase[] = [
     name: 'platform metrics',
     createProps: ({ fn }) => ({
       lambdaFunction: fn,
-      alarm: {
-        platformMetrics: {
-          deadLetterErrors: true,
-          destinationDeliveryFailures: true,
-          iteratorAge: true,
-          iteratorAgeThreshold: 120_000,
-        },
+      platformMetrics: {
+        deadLetterErrors: true,
+        destinationDeliveryFailures: true,
+        iteratorAge: true,
+        iteratorAgeThreshold: 120_000,
       },
     }),
   },

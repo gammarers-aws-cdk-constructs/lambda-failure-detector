@@ -12,7 +12,7 @@ Always creates platform `AWS/Lambda` `Errors` and `Throttles` alarms.
 Optionally creates DeadLetterErrors, DestinationDeliveryFailures, and IteratorAge
 alarms, plus one metric filter and alarm per {@link LogFailureFilter}.
 Does not create a log group or set its retention. Does not create an SNS topic;
-pass {@link LambdaFailureDetectorAlarmProps.topic} to attach notifications.
+pass {@link LambdaFailureDetectorProps.topic} to attach notifications.
 
 #### Initializers <a name="Initializers" id="lambda-failure-detector.LambdaFailureDetector.Initializer"></a>
 
@@ -26,7 +26,7 @@ new LambdaFailureDetector(scope: Construct, id: string, props: LambdaFailureDete
 | --- | --- | --- |
 | <code><a href="#lambda-failure-detector.LambdaFailureDetector.Initializer.parameter.scope">scope</a></code> | <code>constructs.Construct</code> | - Parent construct. |
 | <code><a href="#lambda-failure-detector.LambdaFailureDetector.Initializer.parameter.id">id</a></code> | <code>string</code> | - Construct id. |
-| <code><a href="#lambda-failure-detector.LambdaFailureDetector.Initializer.parameter.props">props</a></code> | <code><a href="#lambda-failure-detector.LambdaFailureDetectorProps">LambdaFailureDetectorProps</a></code> | - Lambda function, optional log group and log filters, and alarm settings. |
+| <code><a href="#lambda-failure-detector.LambdaFailureDetector.Initializer.parameter.props">props</a></code> | <code><a href="#lambda-failure-detector.LambdaFailureDetectorProps">LambdaFailureDetectorProps</a></code> | - SNS topic, Lambda function, optional log group and log filters, and alarm settings. |
 
 ---
 
@@ -50,7 +50,7 @@ Construct id.
 
 - *Type:* <a href="#lambda-failure-detector.LambdaFailureDetectorProps">LambdaFailureDetectorProps</a>
 
-Lambda function, optional log group and log filters, and alarm settings.
+SNS topic, Lambda function, optional log group and log filters, and alarm settings.
 
 ---
 
@@ -359,74 +359,6 @@ How missing datapoints are treated.
 
 ---
 
-### LambdaFailureDetectorAlarmProps <a name="LambdaFailureDetectorAlarmProps" id="lambda-failure-detector.LambdaFailureDetectorAlarmProps"></a>
-
-Shared alarm settings for {@link LambdaFailureDetector}.
-
-The construct does not create an SNS topic.
-
-#### Initializer <a name="Initializer" id="lambda-failure-detector.LambdaFailureDetectorAlarmProps.Initializer"></a>
-
-```typescript
-import { LambdaFailureDetectorAlarmProps } from 'lambda-failure-detector'
-
-const lambdaFailureDetectorAlarmProps: LambdaFailureDetectorAlarmProps = { ... }
-```
-
-#### Properties <a name="Properties" id="Properties"></a>
-
-| **Name** | **Type** | **Description** |
-| --- | --- | --- |
-| <code><a href="#lambda-failure-detector.LambdaFailureDetectorAlarmProps.property.config">config</a></code> | <code><a href="#lambda-failure-detector.AlarmConfig">AlarmConfig</a></code> | Shared CloudWatch alarm settings for failure alarms. |
-| <code><a href="#lambda-failure-detector.LambdaFailureDetectorAlarmProps.property.platformMetrics">platformMetrics</a></code> | <code><a href="#lambda-failure-detector.PlatformMetricsOptions">PlatformMetricsOptions</a></code> | Opt-in platform metrics beyond the standard `Errors` and `Throttles` alarms. |
-| <code><a href="#lambda-failure-detector.LambdaFailureDetectorAlarmProps.property.topic">topic</a></code> | <code>aws-cdk-lib.aws_sns.ITopic</code> | SNS topic for all alarm actions. |
-
----
-
-##### `config`<sup>Optional</sup> <a name="config" id="lambda-failure-detector.LambdaFailureDetectorAlarmProps.property.config"></a>
-
-```typescript
-public readonly config: AlarmConfig;
-```
-
-- *Type:* <a href="#lambda-failure-detector.AlarmConfig">AlarmConfig</a>
-- *Default:* threshold 1, period 5 minutes, evaluationPeriods 1, treatMissingData NOT_BREACHING
-
-Shared CloudWatch alarm settings for failure alarms.
-
-Applies to sum metrics (`Errors`, `Throttles`, opt-in counts, and log filters).
-IteratorAge uses `period` / `evaluationPeriods` / `treatMissingData` from this
-config, but its threshold comes from {@link PlatformMetricsOptions.iteratorAgeThreshold}.
-
----
-
-##### `platformMetrics`<sup>Optional</sup> <a name="platformMetrics" id="lambda-failure-detector.LambdaFailureDetectorAlarmProps.property.platformMetrics"></a>
-
-```typescript
-public readonly platformMetrics: PlatformMetricsOptions;
-```
-
-- *Type:* <a href="#lambda-failure-detector.PlatformMetricsOptions">PlatformMetricsOptions</a>
-- *Default:* no additional platform metric alarms
-
-Opt-in platform metrics beyond the standard `Errors` and `Throttles` alarms.
-
----
-
-##### `topic`<sup>Optional</sup> <a name="topic" id="lambda-failure-detector.LambdaFailureDetectorAlarmProps.property.topic"></a>
-
-```typescript
-public readonly topic: ITopic;
-```
-
-- *Type:* aws-cdk-lib.aws_sns.ITopic
-
-SNS topic for all alarm actions.
-
-When omitted, alarms are created without SNS actions.
-
----
-
 ### LambdaFailureDetectorProps <a name="LambdaFailureDetectorProps" id="lambda-failure-detector.LambdaFailureDetectorProps"></a>
 
 Props for {@link LambdaFailureDetector}.
@@ -444,9 +376,11 @@ const lambdaFailureDetectorProps: LambdaFailureDetectorProps = { ... }
 | **Name** | **Type** | **Description** |
 | --- | --- | --- |
 | <code><a href="#lambda-failure-detector.LambdaFailureDetectorProps.property.lambdaFunction">lambdaFunction</a></code> | <code>aws-cdk-lib.aws_lambda.IFunction</code> | Lambda function whose platform failure metrics are alarmed. |
-| <code><a href="#lambda-failure-detector.LambdaFailureDetectorProps.property.alarm">alarm</a></code> | <code><a href="#lambda-failure-detector.LambdaFailureDetectorAlarmProps">LambdaFailureDetectorAlarmProps</a></code> | SNS topic, shared alarm settings, and opt-in platform metrics. |
+| <code><a href="#lambda-failure-detector.LambdaFailureDetectorProps.property.alarmConfig">alarmConfig</a></code> | <code><a href="#lambda-failure-detector.AlarmConfig">AlarmConfig</a></code> | Shared CloudWatch alarm settings for failure alarms. |
 | <code><a href="#lambda-failure-detector.LambdaFailureDetectorProps.property.logFailureFilters">logFailureFilters</a></code> | <code><a href="#lambda-failure-detector.LogFailureFilter">LogFailureFilter</a>[]</code> | Log-based failure filters. |
 | <code><a href="#lambda-failure-detector.LambdaFailureDetectorProps.property.logGroup">logGroup</a></code> | <code>aws-cdk-lib.aws_logs.ILogGroup</code> | Log group read by {@link LambdaFailureDetectorProps.logFailureFilters}. |
+| <code><a href="#lambda-failure-detector.LambdaFailureDetectorProps.property.platformMetrics">platformMetrics</a></code> | <code><a href="#lambda-failure-detector.PlatformMetricsOptions">PlatformMetricsOptions</a></code> | Opt-in platform metrics beyond the standard `Errors` and `Throttles` alarms. |
+| <code><a href="#lambda-failure-detector.LambdaFailureDetectorProps.property.topic">topic</a></code> | <code>aws-cdk-lib.aws_sns.ITopic</code> | SNS topic for every alarm action, including log failure filters. |
 
 ---
 
@@ -462,16 +396,20 @@ Lambda function whose platform failure metrics are alarmed.
 
 ---
 
-##### `alarm`<sup>Optional</sup> <a name="alarm" id="lambda-failure-detector.LambdaFailureDetectorProps.property.alarm"></a>
+##### `alarmConfig`<sup>Optional</sup> <a name="alarmConfig" id="lambda-failure-detector.LambdaFailureDetectorProps.property.alarmConfig"></a>
 
 ```typescript
-public readonly alarm: LambdaFailureDetectorAlarmProps;
+public readonly alarmConfig: AlarmConfig;
 ```
 
-- *Type:* <a href="#lambda-failure-detector.LambdaFailureDetectorAlarmProps">LambdaFailureDetectorAlarmProps</a>
-- *Default:* default alarm settings, no SNS actions, no extra platform metrics
+- *Type:* <a href="#lambda-failure-detector.AlarmConfig">AlarmConfig</a>
+- *Default:* threshold 1, period 5 minutes, evaluationPeriods 1, treatMissingData NOT_BREACHING
 
-SNS topic, shared alarm settings, and opt-in platform metrics.
+Shared CloudWatch alarm settings for failure alarms.
+
+Applies to sum metrics (`Errors`, `Throttles`, opt-in counts, and log filters).
+IteratorAge uses `period` / `evaluationPeriods` / `treatMissingData` from this
+config, but its threshold comes from {@link PlatformMetricsOptions.iteratorAgeThreshold}.
 
 ---
 
@@ -504,6 +442,34 @@ Log group read by {@link LambdaFailureDetectorProps.logFailureFilters}.
 Required when `logFailureFilters` is non-empty. The construct does not
 create a log group and does not set retention. Ignored when
 `logFailureFilters` is omitted or empty.
+
+---
+
+##### `platformMetrics`<sup>Optional</sup> <a name="platformMetrics" id="lambda-failure-detector.LambdaFailureDetectorProps.property.platformMetrics"></a>
+
+```typescript
+public readonly platformMetrics: PlatformMetricsOptions;
+```
+
+- *Type:* <a href="#lambda-failure-detector.PlatformMetricsOptions">PlatformMetricsOptions</a>
+- *Default:* no additional platform metric alarms
+
+Opt-in platform metrics beyond the standard `Errors` and `Throttles` alarms.
+
+---
+
+##### `topic`<sup>Optional</sup> <a name="topic" id="lambda-failure-detector.LambdaFailureDetectorProps.property.topic"></a>
+
+```typescript
+public readonly topic: ITopic;
+```
+
+- *Type:* aws-cdk-lib.aws_sns.ITopic
+
+SNS topic for every alarm action, including log failure filters.
+
+When omitted, alarms are created without SNS actions.
+The construct does not create a topic.
 
 ---
 
