@@ -2,7 +2,7 @@ import { App, Duration, Stack } from 'aws-cdk-lib';
 import { Template } from 'aws-cdk-lib/assertions';
 import { TreatMissingData } from 'aws-cdk-lib/aws-cloudwatch';
 import { Code, Function, Runtime } from 'aws-cdk-lib/aws-lambda';
-import { FilterPattern, LogGroup, RetentionDays } from 'aws-cdk-lib/aws-logs';
+import { FilterPattern, LogGroup } from 'aws-cdk-lib/aws-logs';
 import { Topic } from 'aws-cdk-lib/aws-sns';
 import {
   LambdaFailureDetector,
@@ -53,6 +53,85 @@ interface ExpectedAlarmShape {
   readonly statistic?: string;
 }
 
+/** Alarm fields these tests read from a synthesized CloudWatch alarm. */
+interface AlarmProperties {
+  readonly MetricName?: unknown;
+  readonly Namespace?: unknown;
+  readonly Threshold?: unknown;
+  readonly EvaluationPeriods?: unknown;
+  readonly ComparisonOperator?: unknown;
+  readonly TreatMissingData?: unknown;
+  readonly Period?: unknown;
+  readonly Statistic?: unknown;
+  readonly AlarmActions?: readonly unknown[];
+}
+
+interface AlarmResource {
+  readonly Properties: AlarmProperties;
+}
+
+const isRecord = (value: unknown): value is Record<string, unknown> => (
+  typeof value === 'object' && value !== null && !Array.isArray(value)
+);
+
+const readUnknownArray = (value: unknown): readonly unknown[] | undefined => {
+  if (value === undefined) {
+    return undefined;
+  }
+  if (!Array.isArray(value)) {
+    throw new Error('CloudWatch alarm AlarmActions was not an array.');
+  }
+
+  const actions: unknown[] = [];
+  for (const action of value) {
+    const item: unknown = action;
+    actions.push(item);
+  }
+  return actions;
+};
+
+const readAlarmProperties = (value: unknown): AlarmProperties => {
+  if (!isRecord(value)) {
+    throw new Error('CloudWatch alarm resource has no properties.');
+  }
+
+  return {
+    MetricName: value.MetricName,
+    Namespace: value.Namespace,
+    Threshold: value.Threshold,
+    EvaluationPeriods: value.EvaluationPeriods,
+    ComparisonOperator: value.ComparisonOperator,
+    TreatMissingData: value.TreatMissingData,
+    Period: value.Period,
+    Statistic: value.Statistic,
+    AlarmActions: readUnknownArray(value.AlarmActions),
+  };
+};
+
+/**
+ * Reads synthesized CloudWatch alarms.
+ *
+ * @param template - Stack template under test.
+ * @returns Alarm properties used by the assertions below.
+ */
+const readAlarmResources = (template: Template): readonly AlarmResource[] => {
+  // aws-cdk-lib types Template.findResources as an index signature of any.
+  const resources: unknown = template.findResources('AWS::CloudWatch::Alarm');
+  if (!isRecord(resources)) {
+    throw new Error('CloudWatch alarm resources were not an object.');
+  }
+
+  return Object.values(resources).map((resource) => {
+    if (!isRecord(resource)) {
+      throw new Error('CloudWatch alarm resource was not an object.');
+    }
+
+    return {
+      Properties: readAlarmProperties(resource.Properties),
+    };
+  });
+};
+
 const expectFailureAlarmShape = (
   template: Template,
   alarmCount: number,
@@ -60,7 +139,7 @@ const expectFailureAlarmShape = (
 ): void => {
   template.resourceCountIs('AWS::CloudWatch::Alarm', alarmCount);
 
-  const alarms = Object.values(template.findResources('AWS::CloudWatch::Alarm'));
+  const alarms = readAlarmResources(template);
   for (const alarm of alarms) {
     expect(alarm.Properties).toEqual(expect.objectContaining({
       Threshold: expected.threshold ?? EXPECTED_THRESHOLD,
@@ -76,13 +155,12 @@ const expectFailureAlarmShape = (
 const findAlarmByMetricName = (
   template: Template,
   metricName: string,
-): Record<string, unknown> => {
-  const alarms = Object.values(template.findResources('AWS::CloudWatch::Alarm'));
-  const match = alarms.find((alarm) => alarm.Properties.MetricName === metricName);
+): AlarmProperties => {
+  const match = readAlarmResources(template).find((alarm) => alarm.Properties.MetricName === metricName);
   if (!match) {
     throw new Error(`Alarm for metric ${metricName} was not found`);
   }
-  return match.Properties as Record<string, unknown>;
+  return match.Properties;
 };
 
 describe('LambdaFailureDetector', () => {
@@ -120,14 +198,10 @@ describe('LambdaFailureDetector', () => {
     const topic = new Topic(stack, 'Alarms');
 
     const detector = new LambdaFailureDetector(stack, 'Detector', {
+      topic,
       lambdaFunction: fn,
-      log: {
-        group: logGroup,
-        filters: [RESOURCE_WAIT_FAILED],
-      },
-      alarm: {
-        topic,
-      },
+      logGroup,
+      logFailureFilters: [RESOURCE_WAIT_FAILED],
     });
 
     const template = Template.fromStack(stack);
@@ -151,7 +225,7 @@ describe('LambdaFailureDetector', () => {
     expect(detector.findLogFilterAlarm(RESOURCE_WAIT_FAILED.id)).toBe(detector.logFilterAlarms[0].alarm);
     expect(detector.findLogFilterAlarm('missing')).toBeUndefined();
 
-    const alarms = Object.values(template.findResources('AWS::CloudWatch::Alarm'));
+    const alarms = readAlarmResources(template);
     for (const alarm of alarms) {
       expect(alarm.Properties.AlarmActions).toHaveLength(1);
     }
@@ -163,17 +237,15 @@ describe('LambdaFailureDetector', () => {
 
     new LambdaFailureDetector(stack, 'Detector', {
       lambdaFunction: fn,
-      log: {
-        group: logGroup,
-        filters: [
-          {
-            id: 'LevelError',
-            filterPattern: levelError,
-            metricNamespace: 'App/Lambda',
-            metricName: 'LevelError',
-          },
-        ],
-      },
+      logGroup,
+      logFailureFilters: [
+        {
+          id: 'LevelError',
+          filterPattern: levelError,
+          metricNamespace: 'App/Lambda',
+          metricName: 'LevelError',
+        },
+      ],
     });
 
     Template.fromStack(stack).hasResourceProperties('AWS::Logs::MetricFilter', {
@@ -186,83 +258,54 @@ describe('LambdaFailureDetector', () => {
 
     expect(() => new LambdaFailureDetector(stack, 'Detector', {
       lambdaFunction: fn,
-      log: {
-        group: logGroup,
-        filters: [
-          RESOURCE_WAIT_FAILED,
-          {
-            ...RESOURCE_WAIT_FAILED,
-            metricName: 'ResourceWaitFailedAgain',
-          },
-        ],
-      },
-    })).toThrow(/Duplicate log filter id "ResourceWaitFailed"/);
+      logGroup,
+      logFailureFilters: [
+        RESOURCE_WAIT_FAILED,
+        {
+          ...RESOURCE_WAIT_FAILED,
+          metricName: 'ResourceWaitFailedAgain',
+        },
+      ],
+    })).toThrow('logFailureFilters id must be unique.');
   });
 
-  it('manages the Lambda log group with one-year retention when filters omit group', () => {
+  it('throws when logFailureFilters is set without logGroup', () => {
     const { stack, fn } = createFixture();
-
-    const detector = new LambdaFailureDetector(stack, 'Detector', {
-      lambdaFunction: fn,
-      log: {
-        filters: [RESOURCE_WAIT_FAILED],
-      },
-    });
-
-    const template = Template.fromStack(stack);
-    expectFailureAlarmShape(template, 3);
-    template.resourceCountIs('AWS::Logs::MetricFilter', 1);
-    template.hasResourceProperties('Custom::LogRetention', {
-      RetentionInDays: 365,
-    });
-    expect(detector.logGroup).toBeDefined();
-  });
-
-  it('applies a custom retention when managing the Lambda log group', () => {
-    const { stack, fn } = createFixture();
-
-    new LambdaFailureDetector(stack, 'Detector', {
-      lambdaFunction: fn,
-      log: {
-        retention: RetentionDays.THREE_MONTHS,
-        filters: [RESOURCE_WAIT_FAILED],
-      },
-    });
-
-    Template.fromStack(stack).hasResourceProperties('Custom::LogRetention', {
-      RetentionInDays: 90,
-    });
-  });
-
-  it('throws when both log.group and log.retention are set', () => {
-    const { stack, fn, logGroup } = createFixture();
 
     expect(() => new LambdaFailureDetector(stack, 'Detector', {
       lambdaFunction: fn,
-      log: {
-        group: logGroup,
-        retention: RetentionDays.ONE_YEAR,
-        filters: [RESOURCE_WAIT_FAILED],
-      },
-    })).toThrow(/Cannot set both log\.group and log\.retention/);
+      logFailureFilters: [RESOURCE_WAIT_FAILED],
+    })).toThrow('logFailureFilters requires logGroup.');
   });
 
-  it('applies alarm.config to every failure sum alarm', () => {
+  it('ignores logGroup when logFailureFilters is omitted', () => {
+    const { stack, fn, logGroup } = createFixture();
+
+    const detector = new LambdaFailureDetector(stack, 'Detector', {
+      lambdaFunction: fn,
+      logGroup,
+    });
+
+    const template = Template.fromStack(stack);
+    expectFailureAlarmShape(template, 2);
+    template.resourceCountIs('AWS::Logs::MetricFilter', 0);
+    template.resourceCountIs('Custom::LogRetention', 0);
+    expect(detector.logGroup).toBeUndefined();
+    expect(detector.logFilterAlarms).toEqual([]);
+  });
+
+  it('applies alarmConfig to every failure sum alarm', () => {
     const { stack, fn, logGroup } = createFixture();
 
     new LambdaFailureDetector(stack, 'Detector', {
       lambdaFunction: fn,
-      log: {
-        group: logGroup,
-        filters: [RESOURCE_WAIT_FAILED],
-      },
-      alarm: {
-        config: {
-          threshold: 3,
-          period: Duration.minutes(1),
-          evaluationPeriods: 2,
-          treatMissingData: TreatMissingData.BREACHING,
-        },
+      logGroup,
+      logFailureFilters: [RESOURCE_WAIT_FAILED],
+      alarmConfig: {
+        threshold: 3,
+        period: Duration.minutes(1),
+        evaluationPeriods: 2,
+        treatMissingData: TreatMissingData.BREACHING,
       },
     });
 
@@ -279,13 +322,11 @@ describe('LambdaFailureDetector', () => {
 
     const detector = new LambdaFailureDetector(stack, 'Detector', {
       lambdaFunction: fn,
-      alarm: {
-        platformMetrics: {
-          deadLetterErrors: true,
-          destinationDeliveryFailures: true,
-          iteratorAge: true,
-          iteratorAgeThreshold: 120_000,
-        },
+      platformMetrics: {
+        deadLetterErrors: true,
+        destinationDeliveryFailures: true,
+        iteratorAge: true,
+        iteratorAgeThreshold: 120_000,
       },
     });
 
@@ -320,10 +361,8 @@ describe('LambdaFailureDetector', () => {
 
     new LambdaFailureDetector(stack, 'Detector', {
       lambdaFunction: fn,
-      alarm: {
-        platformMetrics: {
-          iteratorAge: true,
-        },
+      platformMetrics: {
+        iteratorAge: true,
       },
     });
 
@@ -351,56 +390,38 @@ const SYNTHESIS_SNAPSHOT_CASES: readonly SynthesisSnapshotCase[] = [
     name: 'custom alarm config',
     createProps: ({ fn }) => ({
       lambdaFunction: fn,
-      alarm: {
-        config: {
-          threshold: 3,
-          period: Duration.minutes(1),
-          evaluationPeriods: 2,
-          treatMissingData: TreatMissingData.BREACHING,
-        },
+      alarmConfig: {
+        threshold: 3,
+        period: Duration.minutes(1),
+        evaluationPeriods: 2,
+        treatMissingData: TreatMissingData.BREACHING,
       },
     }),
   },
   {
     name: 'existing topic',
     createProps: ({ stack, fn }) => ({
+      topic: new Topic(stack, 'Alarms'),
       lambdaFunction: fn,
-      alarm: {
-        topic: new Topic(stack, 'Alarms'),
-      },
     }),
   },
   {
     name: 'log filters on an existing log group',
     createProps: ({ fn, logGroup }) => ({
       lambdaFunction: fn,
-      log: {
-        group: logGroup,
-        filters: [RESOURCE_WAIT_FAILED],
-      },
-    }),
-  },
-  {
-    name: 'managed log retention',
-    createProps: ({ fn }) => ({
-      lambdaFunction: fn,
-      log: {
-        retention: RetentionDays.THREE_MONTHS,
-        filters: [RESOURCE_WAIT_FAILED],
-      },
+      logGroup,
+      logFailureFilters: [RESOURCE_WAIT_FAILED],
     }),
   },
   {
     name: 'platform metrics',
     createProps: ({ fn }) => ({
       lambdaFunction: fn,
-      alarm: {
-        platformMetrics: {
-          deadLetterErrors: true,
-          destinationDeliveryFailures: true,
-          iteratorAge: true,
-          iteratorAgeThreshold: 120_000,
-        },
+      platformMetrics: {
+        deadLetterErrors: true,
+        destinationDeliveryFailures: true,
+        iteratorAge: true,
+        iteratorAgeThreshold: 120_000,
       },
     }),
   },
