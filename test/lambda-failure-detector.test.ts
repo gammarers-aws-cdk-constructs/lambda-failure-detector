@@ -2,7 +2,7 @@ import { App, Duration, Stack } from 'aws-cdk-lib';
 import { Template } from 'aws-cdk-lib/assertions';
 import { TreatMissingData } from 'aws-cdk-lib/aws-cloudwatch';
 import { Code, Function, Runtime } from 'aws-cdk-lib/aws-lambda';
-import { FilterPattern, LogGroup, RetentionDays } from 'aws-cdk-lib/aws-logs';
+import { FilterPattern, LogGroup } from 'aws-cdk-lib/aws-logs';
 import { Topic } from 'aws-cdk-lib/aws-sns';
 import {
   LambdaFailureDetector,
@@ -121,10 +121,8 @@ describe('LambdaFailureDetector', () => {
 
     const detector = new LambdaFailureDetector(stack, 'Detector', {
       lambdaFunction: fn,
-      log: {
-        group: logGroup,
-        filters: [RESOURCE_WAIT_FAILED],
-      },
+      logGroup,
+      logFailureFilters: [RESOURCE_WAIT_FAILED],
       alarm: {
         topic,
       },
@@ -163,17 +161,15 @@ describe('LambdaFailureDetector', () => {
 
     new LambdaFailureDetector(stack, 'Detector', {
       lambdaFunction: fn,
-      log: {
-        group: logGroup,
-        filters: [
-          {
-            id: 'LevelError',
-            filterPattern: levelError,
-            metricNamespace: 'App/Lambda',
-            metricName: 'LevelError',
-          },
-        ],
-      },
+      logGroup,
+      logFailureFilters: [
+        {
+          id: 'LevelError',
+          filterPattern: levelError,
+          metricNamespace: 'App/Lambda',
+          metricName: 'LevelError',
+        },
+      ],
     });
 
     Template.fromStack(stack).hasResourceProperties('AWS::Logs::MetricFilter', {
@@ -186,65 +182,40 @@ describe('LambdaFailureDetector', () => {
 
     expect(() => new LambdaFailureDetector(stack, 'Detector', {
       lambdaFunction: fn,
-      log: {
-        group: logGroup,
-        filters: [
-          RESOURCE_WAIT_FAILED,
-          {
-            ...RESOURCE_WAIT_FAILED,
-            metricName: 'ResourceWaitFailedAgain',
-          },
-        ],
-      },
-    })).toThrow(/Duplicate log filter id "ResourceWaitFailed"/);
+      logGroup,
+      logFailureFilters: [
+        RESOURCE_WAIT_FAILED,
+        {
+          ...RESOURCE_WAIT_FAILED,
+          metricName: 'ResourceWaitFailedAgain',
+        },
+      ],
+    })).toThrow('logFailureFilters id must be unique.');
   });
 
-  it('manages the Lambda log group with one-year retention when filters omit group', () => {
+  it('throws when logFailureFilters is set without logGroup', () => {
     const { stack, fn } = createFixture();
-
-    const detector = new LambdaFailureDetector(stack, 'Detector', {
-      lambdaFunction: fn,
-      log: {
-        filters: [RESOURCE_WAIT_FAILED],
-      },
-    });
-
-    const template = Template.fromStack(stack);
-    expectFailureAlarmShape(template, 3);
-    template.resourceCountIs('AWS::Logs::MetricFilter', 1);
-    template.hasResourceProperties('Custom::LogRetention', {
-      RetentionInDays: 365,
-    });
-    expect(detector.logGroup).toBeDefined();
-  });
-
-  it('applies a custom retention when managing the Lambda log group', () => {
-    const { stack, fn } = createFixture();
-
-    new LambdaFailureDetector(stack, 'Detector', {
-      lambdaFunction: fn,
-      log: {
-        retention: RetentionDays.THREE_MONTHS,
-        filters: [RESOURCE_WAIT_FAILED],
-      },
-    });
-
-    Template.fromStack(stack).hasResourceProperties('Custom::LogRetention', {
-      RetentionInDays: 90,
-    });
-  });
-
-  it('throws when both log.group and log.retention are set', () => {
-    const { stack, fn, logGroup } = createFixture();
 
     expect(() => new LambdaFailureDetector(stack, 'Detector', {
       lambdaFunction: fn,
-      log: {
-        group: logGroup,
-        retention: RetentionDays.ONE_YEAR,
-        filters: [RESOURCE_WAIT_FAILED],
-      },
-    })).toThrow(/Cannot set both log\.group and log\.retention/);
+      logFailureFilters: [RESOURCE_WAIT_FAILED],
+    })).toThrow('logFailureFilters requires logGroup.');
+  });
+
+  it('ignores logGroup when logFailureFilters is omitted', () => {
+    const { stack, fn, logGroup } = createFixture();
+
+    const detector = new LambdaFailureDetector(stack, 'Detector', {
+      lambdaFunction: fn,
+      logGroup,
+    });
+
+    const template = Template.fromStack(stack);
+    expectFailureAlarmShape(template, 2);
+    template.resourceCountIs('AWS::Logs::MetricFilter', 0);
+    template.resourceCountIs('Custom::LogRetention', 0);
+    expect(detector.logGroup).toBeUndefined();
+    expect(detector.logFilterAlarms).toEqual([]);
   });
 
   it('applies alarm.config to every failure sum alarm', () => {
@@ -252,10 +223,8 @@ describe('LambdaFailureDetector', () => {
 
     new LambdaFailureDetector(stack, 'Detector', {
       lambdaFunction: fn,
-      log: {
-        group: logGroup,
-        filters: [RESOURCE_WAIT_FAILED],
-      },
+      logGroup,
+      logFailureFilters: [RESOURCE_WAIT_FAILED],
       alarm: {
         config: {
           threshold: 3,
@@ -374,20 +343,8 @@ const SYNTHESIS_SNAPSHOT_CASES: readonly SynthesisSnapshotCase[] = [
     name: 'log filters on an existing log group',
     createProps: ({ fn, logGroup }) => ({
       lambdaFunction: fn,
-      log: {
-        group: logGroup,
-        filters: [RESOURCE_WAIT_FAILED],
-      },
-    }),
-  },
-  {
-    name: 'managed log retention',
-    createProps: ({ fn }) => ({
-      lambdaFunction: fn,
-      log: {
-        retention: RetentionDays.THREE_MONTHS,
-        filters: [RESOURCE_WAIT_FAILED],
-      },
+      logGroup,
+      logFailureFilters: [RESOURCE_WAIT_FAILED],
     }),
   },
   {

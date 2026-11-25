@@ -14,16 +14,15 @@ Creates Amazon CloudWatch alarms for an AWS Lambda function. The construct alarm
 - CloudWatch alarms on the Lambda `Errors` and `Throttles` metrics
 - Optional platform alarms for `DeadLetterErrors`, `DestinationDeliveryFailures`, and stream `IteratorAge`
 - Optional log metric filters and alarms for any CloudWatch Logs filter pattern, including JSON field comparisons
-- Optional log retention when the construct manages the Lambda log group (default one year)
 - Optional shared alarm config for threshold, period, evaluation periods, and missing-data handling
 - Optional notifications through an existing SNS topic
 
 ## How it works
 
-1. You pass a Lambda function. A log group is needed only when you supply `log.filters`.
+1. You pass a Lambda function. Pass `logGroup` only when you supply `logFailureFilters`. The construct does not create a log group and does not set retention.
 2. The construct creates CloudWatch alarms on the `AWS/Lambda` `Errors` and `Throttles` metrics. By default, missing data does not breach, so a quiet schedule stays quiet between runs.
 3. When you enable entries in `alarm.platformMetrics`, the construct adds matching platform alarms (`DeadLetterErrors`, `DestinationDeliveryFailures`, and/or `IteratorAge`).
-4. For each log filter, the construct adds a metric filter and an alarm on the filter's sum. Pass `log.group` to use an existing group, or omit it to manage `/aws/lambda/<functionName>` with `log.retention` (default one year). Do not set both `log.group` and `log.retention`. Each filter `id` must be unique; a duplicate fails synthesis.
+4. For each entry in `logFailureFilters`, the construct adds a metric filter on `logGroup` and an alarm on the filter's sum. Omitting `logGroup` when filters are set fails synthesis. Each filter `id` must be unique; a duplicate fails synthesis.
 5. When you pass `alarm.config`, failure sum alarms use those settings. Defaults are threshold 1, period 5 minutes, evaluationPeriods 1, and treatMissingData `NOT_BREACHING`.
 6. IteratorAge uses the same period and evaluation settings from `alarm.config`, but its threshold comes from `alarm.platformMetrics.iteratorAgeThreshold` (default 60000 ms).
 7. When you pass `alarm.topic`, every alarm notifies that topic. When you omit the topic, the alarms remain and have no SNS action. The construct does not create a topic.
@@ -91,38 +90,37 @@ Deploy checklist:
 1. Install this package and peers (`aws-cdk-lib`, `constructs`) in your CDK app.
 2. From the CDK app: `npx cdk deploy ExampleStack`
 
-To alarm on a log line and notify an existing topic, pass `log.filters` and `alarm.topic`. Omit `log.group` to manage `/aws/lambda/<functionName>` with one-year retention (or set `log.retention`). Pass `alarm.config` when the default threshold or evaluation window needs tuning. Create the construct only when failure detection should be on.
+To alarm on a log line and notify an existing topic, pass `logGroup`, `logFailureFilters`, and `alarm.topic`. Create the log group yourself and set its retention there. Omitting `logGroup` when `logFailureFilters` is set fails synthesis. Pass `alarm.config` when the default threshold or evaluation window needs tuning. Create the construct only when failure detection should be on.
 
 ```ts
 import { Duration } from 'aws-cdk-lib';
 import { TreatMissingData } from 'aws-cdk-lib/aws-cloudwatch';
 import { type IFunction } from 'aws-cdk-lib/aws-lambda';
-import { FilterPattern, RetentionDays } from 'aws-cdk-lib/aws-logs';
+import { FilterPattern, type ILogGroup } from 'aws-cdk-lib/aws-logs';
 import { type ITopic } from 'aws-cdk-lib/aws-sns';
 import { LambdaFailureDetector } from 'lambda-failure-detector';
 
 declare const fn: IFunction;
+declare const logGroup: ILogGroup;
 declare const topic: ITopic;
 
 new LambdaFailureDetector(this, 'FailureDetector', {
   lambdaFunction: fn,
-  log: {
-    retention: RetentionDays.THREE_MONTHS,
-    filters: [
-      {
-        id: 'ResourceWaitFailed',
-        filterPattern: FilterPattern.literal('"ResourceWaitFailed"'),
-        metricNamespace: 'App/Lambda',
-        metricName: 'ResourceWaitFailed',
-      },
-      {
-        id: 'LevelError',
-        filterPattern: FilterPattern.stringValue('$.level', '=', 'ERROR'),
-        metricNamespace: 'App/Lambda',
-        metricName: 'LevelError',
-      },
-    ],
-  },
+  logGroup,
+  logFailureFilters: [
+    {
+      id: 'ResourceWaitFailed',
+      filterPattern: FilterPattern.literal('"ResourceWaitFailed"'),
+      metricNamespace: 'App/Lambda',
+      metricName: 'ResourceWaitFailed',
+    },
+    {
+      id: 'LevelError',
+      filterPattern: FilterPattern.stringValue('$.level', '=', 'ERROR'),
+      metricNamespace: 'App/Lambda',
+      metricName: 'LevelError',
+    },
+  ],
   alarm: {
     topic,
     config: {
@@ -142,16 +140,9 @@ new LambdaFailureDetector(this, 'FailureDetector', {
 | Property | Type | Required | Description |
 | --- | --- | --- | --- |
 | `lambdaFunction` | `lambda.IFunction` | yes | Lambda function whose platform failure metrics are alarmed. |
-| `log` | `LambdaFailureDetectorLogProps` | no | Log group, retention, and log filters. Default: platform alarms only. |
+| `logGroup` | `logs.ILogGroup` | no | Log group for `logFailureFilters`. Required when `logFailureFilters` is non-empty. The construct does not create a log group or set retention. |
+| `logFailureFilters` | `LogFailureFilter[]` | no | Log-based failure filters. Default: no log-based alarms. Each `id` must be unique. |
 | `alarm` | `LambdaFailureDetectorAlarmProps` | no | SNS topic, shared alarm settings, and opt-in platform metrics. |
-
-### LambdaFailureDetectorLogProps
-
-| Property | Type | Required | Description |
-| --- | --- | --- | --- |
-| `group` | `logs.ILogGroup` | no | Log group for log metric filters. Omit with `filters` to manage `/aws/lambda/<functionName>`. Do not set with `retention`. |
-| `retention` | `logs.RetentionDays` | no | Retention when the construct manages the Lambda log group. Default: `ONE_YEAR`. Do not set with `group`. |
-| `filters` | `LogFailureFilter[]` | no | Log-based failure filters. Default: no log-based alarms. Each `id` must be unique. |
 
 ### LambdaFailureDetectorAlarmProps
 
@@ -183,7 +174,7 @@ new LambdaFailureDetector(this, 'FailureDetector', {
 
 | Property | Type | Required | Description |
 | --- | --- | --- | --- |
-| `id` | `string` | yes | Stable id used as the MetricFilter and Alarm construct id prefix. Must be unique within `log.filters`. |
+| `id` | `string` | yes | Stable id used as the MetricFilter and Alarm construct id prefix. Must be unique within `logFailureFilters`. |
 | `filterPattern` | `logs.IFilterPattern` | yes | CloudWatch Logs filter pattern. Passed through to the metric filter. |
 | `metricNamespace` | `string` | yes | Custom metric namespace for the metric filter. |
 | `metricName` | `string` | yes | Custom metric name for the metric filter. |

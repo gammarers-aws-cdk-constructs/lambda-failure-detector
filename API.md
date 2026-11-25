@@ -11,8 +11,8 @@ CloudWatch failure detection for a Lambda function.
 Always creates platform `AWS/Lambda` `Errors` and `Throttles` alarms.
 Optionally creates DeadLetterErrors, DestinationDeliveryFailures, and IteratorAge
 alarms, plus one metric filter and alarm per {@link LogFailureFilter}.
-Does not create an SNS topic; pass {@link LambdaFailureDetectorAlarmProps.topic}
-to attach notifications.
+Does not create a log group or set its retention. Does not create an SNS topic;
+pass {@link LambdaFailureDetectorAlarmProps.topic} to attach notifications.
 
 #### Initializers <a name="Initializers" id="lambda-failure-detector.LambdaFailureDetector.Initializer"></a>
 
@@ -26,7 +26,7 @@ new LambdaFailureDetector(scope: Construct, id: string, props: LambdaFailureDete
 | --- | --- | --- |
 | <code><a href="#lambda-failure-detector.LambdaFailureDetector.Initializer.parameter.scope">scope</a></code> | <code>constructs.Construct</code> | - Parent construct. |
 | <code><a href="#lambda-failure-detector.LambdaFailureDetector.Initializer.parameter.id">id</a></code> | <code>string</code> | - Construct id. |
-| <code><a href="#lambda-failure-detector.LambdaFailureDetector.Initializer.parameter.props">props</a></code> | <code><a href="#lambda-failure-detector.LambdaFailureDetectorProps">LambdaFailureDetectorProps</a></code> | - Lambda, optional log group / retention / filters, and alarm settings. |
+| <code><a href="#lambda-failure-detector.LambdaFailureDetector.Initializer.parameter.props">props</a></code> | <code><a href="#lambda-failure-detector.LambdaFailureDetectorProps">LambdaFailureDetectorProps</a></code> | - Lambda function, optional log group and log filters, and alarm settings. |
 
 ---
 
@@ -50,7 +50,7 @@ Construct id.
 
 - *Type:* <a href="#lambda-failure-detector.LambdaFailureDetectorProps">LambdaFailureDetectorProps</a>
 
-Lambda, optional log group / retention / filters, and alarm settings.
+Lambda function, optional log group and log filters, and alarm settings.
 
 ---
 
@@ -156,7 +156,7 @@ Any object.
 | <code><a href="#lambda-failure-detector.LambdaFailureDetector.property.node">node</a></code> | <code>constructs.Node</code> | The tree node. |
 | <code><a href="#lambda-failure-detector.LambdaFailureDetector.property.lambdaErrorsAlarm">lambdaErrorsAlarm</a></code> | <code>aws-cdk-lib.aws_cloudwatch.Alarm</code> | Fires when the Lambda `Errors` metric is non-zero. |
 | <code><a href="#lambda-failure-detector.LambdaFailureDetector.property.lambdaThrottlesAlarm">lambdaThrottlesAlarm</a></code> | <code>aws-cdk-lib.aws_cloudwatch.Alarm</code> | Fires when the Lambda `Throttles` metric is non-zero. |
-| <code><a href="#lambda-failure-detector.LambdaFailureDetector.property.logFilterAlarms">logFilterAlarms</a></code> | <code><a href="#lambda-failure-detector.LogFailureAlarm">LogFailureAlarm</a>[]</code> | Alarms for each log filter, in the same order as {@link LambdaFailureDetectorLogProps.filters}. |
+| <code><a href="#lambda-failure-detector.LambdaFailureDetector.property.logFilterAlarms">logFilterAlarms</a></code> | <code><a href="#lambda-failure-detector.LogFailureAlarm">LogFailureAlarm</a>[]</code> | Alarms for each log filter, in the same order as {@link LambdaFailureDetectorProps.logFailureFilters}. |
 | <code><a href="#lambda-failure-detector.LambdaFailureDetector.property.alarmTopic">alarmTopic</a></code> | <code>aws-cdk-lib.aws_sns.ITopic</code> | SNS topic used for alarm actions, when configured. |
 | <code><a href="#lambda-failure-detector.LambdaFailureDetector.property.deadLetterErrorsAlarm">deadLetterErrorsAlarm</a></code> | <code>aws-cdk-lib.aws_cloudwatch.Alarm</code> | Fires when `DeadLetterErrors` is non-zero, when opted in. |
 | <code><a href="#lambda-failure-detector.LambdaFailureDetector.property.destinationDeliveryFailuresAlarm">destinationDeliveryFailuresAlarm</a></code> | <code>aws-cdk-lib.aws_cloudwatch.Alarm</code> | Fires when `DestinationDeliveryFailures` is non-zero, when opted in. |
@@ -209,7 +209,7 @@ public readonly logFilterAlarms: LogFailureAlarm[];
 
 - *Type:* <a href="#lambda-failure-detector.LogFailureAlarm">LogFailureAlarm</a>[]
 
-Alarms for each log filter, in the same order as {@link LambdaFailureDetectorLogProps.filters}.
+Alarms for each log filter, in the same order as {@link LambdaFailureDetectorProps.logFailureFilters}.
 
 ---
 
@@ -427,81 +427,6 @@ When omitted, alarms are created without SNS actions.
 
 ---
 
-### LambdaFailureDetectorLogProps <a name="LambdaFailureDetectorLogProps" id="lambda-failure-detector.LambdaFailureDetectorLogProps"></a>
-
-Log group and log-based failure filters for {@link LambdaFailureDetector}.
-
-#### Initializer <a name="Initializer" id="lambda-failure-detector.LambdaFailureDetectorLogProps.Initializer"></a>
-
-```typescript
-import { LambdaFailureDetectorLogProps } from 'lambda-failure-detector'
-
-const lambdaFailureDetectorLogProps: LambdaFailureDetectorLogProps = { ... }
-```
-
-#### Properties <a name="Properties" id="Properties"></a>
-
-| **Name** | **Type** | **Description** |
-| --- | --- | --- |
-| <code><a href="#lambda-failure-detector.LambdaFailureDetectorLogProps.property.filters">filters</a></code> | <code><a href="#lambda-failure-detector.LogFailureFilter">LogFailureFilter</a>[]</code> | Log-based failure filters. |
-| <code><a href="#lambda-failure-detector.LambdaFailureDetectorLogProps.property.group">group</a></code> | <code>aws-cdk-lib.aws_logs.ILogGroup</code> | Log group used for {@link LogFailureFilter} metric filters. |
-| <code><a href="#lambda-failure-detector.LambdaFailureDetectorLogProps.property.retention">retention</a></code> | <code>aws-cdk-lib.aws_logs.RetentionDays</code> | Retention for the Lambda log group when the construct manages it. |
-
----
-
-##### `filters`<sup>Optional</sup> <a name="filters" id="lambda-failure-detector.LambdaFailureDetectorLogProps.property.filters"></a>
-
-```typescript
-public readonly filters: LogFailureFilter[];
-```
-
-- *Type:* <a href="#lambda-failure-detector.LogFailureFilter">LogFailureFilter</a>[]
-- *Default:* no log-based alarms
-
-Log-based failure filters.
-
-Each entry creates a metric filter and alarm.
-
----
-
-##### `group`<sup>Optional</sup> <a name="group" id="lambda-failure-detector.LambdaFailureDetectorLogProps.property.group"></a>
-
-```typescript
-public readonly group: ILogGroup;
-```
-
-- *Type:* aws-cdk-lib.aws_logs.ILogGroup
-
-Log group used for {@link LogFailureFilter} metric filters.
-
-Required only when you pass {@link LambdaFailureDetectorLogProps.filters}
-and want to use an existing group. When omitted with filters, the
-construct manages `/aws/lambda/<functionName>` and applies
-{@link LambdaFailureDetectorLogProps.retention}.
-
-Do not set together with {@link LambdaFailureDetectorLogProps.retention}.
-
----
-
-##### `retention`<sup>Optional</sup> <a name="retention" id="lambda-failure-detector.LambdaFailureDetectorLogProps.property.retention"></a>
-
-```typescript
-public readonly retention: RetentionDays;
-```
-
-- *Type:* aws-cdk-lib.aws_logs.RetentionDays
-- *Default:* RetentionDays.ONE_YEAR
-
-Retention for the Lambda log group when the construct manages it.
-
-Used when {@link LambdaFailureDetectorLogProps.filters} are set and
-{@link LambdaFailureDetectorLogProps.group} is omitted. Creates a
-`LogRetention` custom resource for `/aws/lambda/<functionName>`.
-
-Do not set together with {@link LambdaFailureDetectorLogProps.group}.
-
----
-
 ### LambdaFailureDetectorProps <a name="LambdaFailureDetectorProps" id="lambda-failure-detector.LambdaFailureDetectorProps"></a>
 
 Props for {@link LambdaFailureDetector}.
@@ -520,7 +445,8 @@ const lambdaFailureDetectorProps: LambdaFailureDetectorProps = { ... }
 | --- | --- | --- |
 | <code><a href="#lambda-failure-detector.LambdaFailureDetectorProps.property.lambdaFunction">lambdaFunction</a></code> | <code>aws-cdk-lib.aws_lambda.IFunction</code> | Lambda function whose platform failure metrics are alarmed. |
 | <code><a href="#lambda-failure-detector.LambdaFailureDetectorProps.property.alarm">alarm</a></code> | <code><a href="#lambda-failure-detector.LambdaFailureDetectorAlarmProps">LambdaFailureDetectorAlarmProps</a></code> | SNS topic, shared alarm settings, and opt-in platform metrics. |
-| <code><a href="#lambda-failure-detector.LambdaFailureDetectorProps.property.log">log</a></code> | <code><a href="#lambda-failure-detector.LambdaFailureDetectorLogProps">LambdaFailureDetectorLogProps</a></code> | Log group, retention, and log-based failure filters. |
+| <code><a href="#lambda-failure-detector.LambdaFailureDetectorProps.property.logFailureFilters">logFailureFilters</a></code> | <code><a href="#lambda-failure-detector.LogFailureFilter">LogFailureFilter</a>[]</code> | Log-based failure filters. |
+| <code><a href="#lambda-failure-detector.LambdaFailureDetectorProps.property.logGroup">logGroup</a></code> | <code>aws-cdk-lib.aws_logs.ILogGroup</code> | Log group read by {@link LambdaFailureDetectorProps.logFailureFilters}. |
 
 ---
 
@@ -549,16 +475,35 @@ SNS topic, shared alarm settings, and opt-in platform metrics.
 
 ---
 
-##### `log`<sup>Optional</sup> <a name="log" id="lambda-failure-detector.LambdaFailureDetectorProps.property.log"></a>
+##### `logFailureFilters`<sup>Optional</sup> <a name="logFailureFilters" id="lambda-failure-detector.LambdaFailureDetectorProps.property.logFailureFilters"></a>
 
 ```typescript
-public readonly log: LambdaFailureDetectorLogProps;
+public readonly logFailureFilters: LogFailureFilter[];
 ```
 
-- *Type:* <a href="#lambda-failure-detector.LambdaFailureDetectorLogProps">LambdaFailureDetectorLogProps</a>
-- *Default:* platform alarms only; no log group is managed
+- *Type:* <a href="#lambda-failure-detector.LogFailureFilter">LogFailureFilter</a>[]
+- *Default:* no log-based alarms
 
-Log group, retention, and log-based failure filters.
+Log-based failure filters.
+
+Each entry creates a metric filter and alarm
+on {@link LambdaFailureDetectorProps.logGroup}.
+
+---
+
+##### `logGroup`<sup>Optional</sup> <a name="logGroup" id="lambda-failure-detector.LambdaFailureDetectorProps.property.logGroup"></a>
+
+```typescript
+public readonly logGroup: ILogGroup;
+```
+
+- *Type:* aws-cdk-lib.aws_logs.ILogGroup
+
+Log group read by {@link LambdaFailureDetectorProps.logFailureFilters}.
+
+Required when `logFailureFilters` is non-empty. The construct does not
+create a log group and does not set retention. Ignored when
+`logFailureFilters` is omitted or empty.
 
 ---
 
@@ -664,7 +609,7 @@ public readonly id: string;
 
 Stable id used as the MetricFilter / Alarm construct id prefix (e.g. `InstanceStatusFailure` → `InstanceStatusFailureMetric`).
 
-Must be unique among {@link LambdaFailureDetectorLogProps.filters}.
+Must be unique among {@link LambdaFailureDetectorProps.logFailureFilters}.
 
 ---
 

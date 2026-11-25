@@ -9,10 +9,7 @@ import {
 import { SnsAction } from 'aws-cdk-lib/aws-cloudwatch-actions';
 import { type IFunction } from 'aws-cdk-lib/aws-lambda';
 import {
-  LogGroup,
-  LogRetention,
   MetricFilter,
-  RetentionDays,
   type IFilterPattern,
   type ILogGroup,
 } from 'aws-cdk-lib/aws-logs';
@@ -33,8 +30,6 @@ const ITERATOR_AGE_STATISTIC = 'Maximum';
 const ITERATOR_AGE_DEFAULT_THRESHOLD_MS = 60_000;
 /** CloudWatch namespace for Lambda platform metrics. */
 const LAMBDA_METRIC_NAMESPACE = 'AWS/Lambda';
-/** Default retention when the construct manages the Lambda log group. */
-const DEFAULT_LOG_RETENTION = RetentionDays.ONE_YEAR;
 /** Metric filter value emitted per matching log event. */
 const LOG_METRIC_VALUE = '1';
 /** Default value when no matching log events occur in the period. */
@@ -77,7 +72,7 @@ const resolveAlarmConfig = (config?: AlarmConfig): ResolvedAlarmConfig => ({
  * Construct ids are `${id}Metric` and `${id}Alarm`, so a repeated id would fail
  * later with a generic construct-id collision.
  *
- * @param filters - Log filters from {@link LambdaFailureDetectorLogProps.filters}.
+ * @param filters - Log filters from {@link LambdaFailureDetectorProps.logFailureFilters}.
  * @throws Error when two filters share the same `id`.
  */
 const ensureUniqueLogFilterIds = (filters: readonly LogFailureFilter[]): void => {
@@ -85,9 +80,7 @@ const ensureUniqueLogFilterIds = (filters: readonly LogFailureFilter[]): void =>
 
   for (const filter of filters) {
     if (seen.has(filter.id)) {
-      throw new Error(
-        `Duplicate log filter id "${filter.id}". Each entry in log.filters must have a unique id.`,
-      );
+      throw new Error('logFailureFilters id must be unique.');
     }
 
     seen.add(filter.id);
@@ -95,49 +88,29 @@ const ensureUniqueLogFilterIds = (filters: readonly LogFailureFilter[]): void =>
 };
 
 /**
- * Resolves the log group for metric filters, or undefined when none are needed.
+ * Returns the caller log group for metric filters, or undefined when none are needed.
  *
- * When `filters` is empty, no log group is required. When filters are present
- * and `group` is omitted, manages `/aws/lambda/<functionName>` with
- * `retention` (default one year). Does not call `Function.logGroup`, which
- * would otherwise attach infinite retention.
+ * Does not read `Function.logGroup`. That getter creates a log group with
+ * infinite retention when the function does not already have one.
  *
- * @param scope - Parent construct for managed retention resources.
- * @param lambdaFunction - Function whose default log group name is derived.
- * @param logGroup - Explicit log group from the caller.
- * @param logRetention - Retention when the construct manages the log group.
- * @param logFilters - Log filters that require a log group.
- * @returns Log group for metric filters, or undefined when unused.
- * @throws Error when both `log.group` and `log.retention` are set.
+ * @param logGroup - Log group from {@link LambdaFailureDetectorProps.logGroup}.
+ * @param logFilters - Entries from {@link LambdaFailureDetectorProps.logFailureFilters}.
+ * @returns The log group metric filters read, or undefined when there are no filters.
+ * @throws Error when filters are non-empty and `logGroup` is omitted.
  */
-const resolveLogGroupForFilters = (
-  scope: Construct,
-  lambdaFunction: IFunction,
+const requireLogGroupForFilters = (
   logGroup: ILogGroup | undefined,
-  logRetention: RetentionDays | undefined,
   logFilters: readonly LogFailureFilter[],
 ): ILogGroup | undefined => {
-  if (logGroup && logRetention !== undefined) {
-    throw new Error(
-      'Cannot set both log.group and log.retention. Pass log.group when you manage retention yourself, or omit log.group to let the construct apply log.retention.',
-    );
-  }
-
   if (logFilters.length === 0) {
     return undefined;
   }
 
-  if (logGroup) {
-    return logGroup;
+  if (!logGroup) {
+    throw new Error('logFailureFilters requires logGroup.');
   }
 
-  const logGroupName = `/aws/lambda/${lambdaFunction.functionName}`;
-  const retention = new LogRetention(scope, 'LogRetention', {
-    logGroupName,
-    retention: logRetention ?? DEFAULT_LOG_RETENTION,
-  });
-
-  return LogGroup.fromLogGroupArn(scope, 'LogGroup', retention.logGroupArn);
+  return logGroup;
 };
 
 /**
@@ -396,7 +369,7 @@ export interface LogFailureFilter {
    * Stable id used as the MetricFilter / Alarm construct id prefix
    * (e.g. `InstanceStatusFailure` → `InstanceStatusFailureMetric`).
    *
-   * Must be unique among {@link LambdaFailureDetectorLogProps.filters}.
+   * Must be unique among {@link LambdaFailureDetectorProps.logFailureFilters}.
    */
   readonly id: string;
   /**
@@ -453,41 +426,6 @@ export interface PlatformMetricsOptions {
 }
 
 /**
- * Log group and log-based failure filters for {@link LambdaFailureDetector}.
- */
-export interface LambdaFailureDetectorLogProps {
-  /**
-   * Log group used for {@link LogFailureFilter} metric filters.
-   *
-   * Required only when you pass {@link LambdaFailureDetectorLogProps.filters}
-   * and want to use an existing group. When omitted with filters, the
-   * construct manages `/aws/lambda/<functionName>` and applies
-   * {@link LambdaFailureDetectorLogProps.retention}.
-   *
-   * Do not set together with {@link LambdaFailureDetectorLogProps.retention}.
-   */
-  readonly group?: ILogGroup;
-  /**
-   * Retention for the Lambda log group when the construct manages it.
-   *
-   * Used when {@link LambdaFailureDetectorLogProps.filters} are set and
-   * {@link LambdaFailureDetectorLogProps.group} is omitted. Creates a
-   * `LogRetention` custom resource for `/aws/lambda/<functionName>`.
-   *
-   * Do not set together with {@link LambdaFailureDetectorLogProps.group}.
-   *
-   * @default RetentionDays.ONE_YEAR
-   */
-  readonly retention?: RetentionDays;
-  /**
-   * Log-based failure filters. Each entry creates a metric filter and alarm.
-   *
-   * @default no log-based alarms
-   */
-  readonly filters?: LogFailureFilter[];
-}
-
-/**
  * Shared alarm settings for {@link LambdaFailureDetector}.
  *
  * The construct does not create an SNS topic.
@@ -524,11 +462,20 @@ export interface LambdaFailureDetectorProps {
   /** Lambda function whose platform failure metrics are alarmed. */
   readonly lambdaFunction: IFunction;
   /**
-   * Log group, retention, and log-based failure filters.
+   * Log group read by {@link LambdaFailureDetectorProps.logFailureFilters}.
    *
-   * @default platform alarms only; no log group is managed
+   * Required when `logFailureFilters` is non-empty. The construct does not
+   * create a log group and does not set retention. Ignored when
+   * `logFailureFilters` is omitted or empty.
    */
-  readonly log?: LambdaFailureDetectorLogProps;
+  readonly logGroup?: ILogGroup;
+  /**
+   * Log-based failure filters. Each entry creates a metric filter and alarm
+   * on {@link LambdaFailureDetectorProps.logGroup}.
+   *
+   * @default no log-based alarms
+   */
+  readonly logFailureFilters?: LogFailureFilter[];
   /**
    * SNS topic, shared alarm settings, and opt-in platform metrics.
    *
@@ -553,8 +500,8 @@ export interface LogFailureAlarm {
  * Always creates platform `AWS/Lambda` `Errors` and `Throttles` alarms.
  * Optionally creates DeadLetterErrors, DestinationDeliveryFailures, and IteratorAge
  * alarms, plus one metric filter and alarm per {@link LogFailureFilter}.
- * Does not create an SNS topic; pass {@link LambdaFailureDetectorAlarmProps.topic}
- * to attach notifications.
+ * Does not create a log group or set its retention. Does not create an SNS topic;
+ * pass {@link LambdaFailureDetectorAlarmProps.topic} to attach notifications.
  */
 export class LambdaFailureDetector extends Construct {
   /** SNS topic used for alarm actions, when configured. */
@@ -577,16 +524,16 @@ export class LambdaFailureDetector extends Construct {
   public readonly iteratorAgeAlarm?: Alarm;
   /**
    * Alarms for each log filter, in the same order as
-   * {@link LambdaFailureDetectorLogProps.filters}.
+   * {@link LambdaFailureDetectorProps.logFailureFilters}.
    */
   public readonly logFilterAlarms: LogFailureAlarm[];
 
   /**
    * @param scope - Parent construct.
    * @param id - Construct id.
-   * @param props - Lambda, optional log group / retention / filters, and alarm settings.
-   * @throws Error when both `log.group` and `log.retention` are set.
-   * @throws Error when `log.filters` contains a duplicate `id`.
+   * @param props - Lambda function, optional log group and log filters, and alarm settings.
+   * @throws Error when `logFailureFilters` is non-empty and `logGroup` is omitted.
+   * @throws Error when `logFailureFilters` contains a duplicate `id`.
    */
   constructor(scope: Construct, id: string, props: LambdaFailureDetectorProps) {
     super(scope, id);
@@ -594,15 +541,9 @@ export class LambdaFailureDetector extends Construct {
     const alarmTopic = props.alarm?.topic;
     this.alarmTopic = alarmTopic;
     const alarmConfig = resolveAlarmConfig(props.alarm?.config);
-    const logFilters = props.log?.filters ?? [];
+    const logFilters = props.logFailureFilters ?? [];
     ensureUniqueLogFilterIds(logFilters);
-    const logGroup = resolveLogGroupForFilters(
-      this,
-      props.lambdaFunction,
-      props.log?.group,
-      props.log?.retention,
-      logFilters,
-    );
+    const logGroup = requireLogGroupForFilters(props.logGroup, logFilters);
     this.logGroup = logGroup;
 
     this.lambdaErrorsAlarm = createSumAlarm(
@@ -656,7 +597,7 @@ export class LambdaFailureDetector extends Construct {
    * Returns the log-filter alarm for the given filter id, or undefined when missing.
    *
    * @param id - Same as {@link LogFailureFilter.id}.
-   * @returns Matching alarm, or undefined when the id was not in `log.filters`.
+   * @returns Matching alarm, or undefined when the id was not in `logFailureFilters`.
    */
   public findLogFilterAlarm(id: string): Alarm | undefined {
     return this.logFilterAlarms.find((entry) => entry.id === id)?.alarm;
