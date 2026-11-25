@@ -53,6 +53,85 @@ interface ExpectedAlarmShape {
   readonly statistic?: string;
 }
 
+/** Alarm fields these tests read from a synthesized CloudWatch alarm. */
+interface AlarmProperties {
+  readonly MetricName?: unknown;
+  readonly Namespace?: unknown;
+  readonly Threshold?: unknown;
+  readonly EvaluationPeriods?: unknown;
+  readonly ComparisonOperator?: unknown;
+  readonly TreatMissingData?: unknown;
+  readonly Period?: unknown;
+  readonly Statistic?: unknown;
+  readonly AlarmActions?: readonly unknown[];
+}
+
+interface AlarmResource {
+  readonly Properties: AlarmProperties;
+}
+
+const isRecord = (value: unknown): value is Record<string, unknown> => (
+  typeof value === 'object' && value !== null && !Array.isArray(value)
+);
+
+const readUnknownArray = (value: unknown): readonly unknown[] | undefined => {
+  if (value === undefined) {
+    return undefined;
+  }
+  if (!Array.isArray(value)) {
+    throw new Error('CloudWatch alarm AlarmActions was not an array.');
+  }
+
+  const actions: unknown[] = [];
+  for (const action of value) {
+    const item: unknown = action;
+    actions.push(item);
+  }
+  return actions;
+};
+
+const readAlarmProperties = (value: unknown): AlarmProperties => {
+  if (!isRecord(value)) {
+    throw new Error('CloudWatch alarm resource has no properties.');
+  }
+
+  return {
+    MetricName: value.MetricName,
+    Namespace: value.Namespace,
+    Threshold: value.Threshold,
+    EvaluationPeriods: value.EvaluationPeriods,
+    ComparisonOperator: value.ComparisonOperator,
+    TreatMissingData: value.TreatMissingData,
+    Period: value.Period,
+    Statistic: value.Statistic,
+    AlarmActions: readUnknownArray(value.AlarmActions),
+  };
+};
+
+/**
+ * Reads synthesized CloudWatch alarms.
+ *
+ * @param template - Stack template under test.
+ * @returns Alarm properties used by the assertions below.
+ */
+const readAlarmResources = (template: Template): readonly AlarmResource[] => {
+  // aws-cdk-lib types Template.findResources as an index signature of any.
+  const resources: unknown = template.findResources('AWS::CloudWatch::Alarm');
+  if (!isRecord(resources)) {
+    throw new Error('CloudWatch alarm resources were not an object.');
+  }
+
+  return Object.values(resources).map((resource) => {
+    if (!isRecord(resource)) {
+      throw new Error('CloudWatch alarm resource was not an object.');
+    }
+
+    return {
+      Properties: readAlarmProperties(resource.Properties),
+    };
+  });
+};
+
 const expectFailureAlarmShape = (
   template: Template,
   alarmCount: number,
@@ -60,7 +139,7 @@ const expectFailureAlarmShape = (
 ): void => {
   template.resourceCountIs('AWS::CloudWatch::Alarm', alarmCount);
 
-  const alarms = Object.values(template.findResources('AWS::CloudWatch::Alarm'));
+  const alarms = readAlarmResources(template);
   for (const alarm of alarms) {
     expect(alarm.Properties).toEqual(expect.objectContaining({
       Threshold: expected.threshold ?? EXPECTED_THRESHOLD,
@@ -76,13 +155,12 @@ const expectFailureAlarmShape = (
 const findAlarmByMetricName = (
   template: Template,
   metricName: string,
-): Record<string, unknown> => {
-  const alarms = Object.values(template.findResources('AWS::CloudWatch::Alarm'));
-  const match = alarms.find((alarm) => alarm.Properties.MetricName === metricName);
+): AlarmProperties => {
+  const match = readAlarmResources(template).find((alarm) => alarm.Properties.MetricName === metricName);
   if (!match) {
     throw new Error(`Alarm for metric ${metricName} was not found`);
   }
-  return match.Properties as Record<string, unknown>;
+  return match.Properties;
 };
 
 describe('LambdaFailureDetector', () => {
@@ -147,7 +225,7 @@ describe('LambdaFailureDetector', () => {
     expect(detector.findLogFilterAlarm(RESOURCE_WAIT_FAILED.id)).toBe(detector.logFilterAlarms[0].alarm);
     expect(detector.findLogFilterAlarm('missing')).toBeUndefined();
 
-    const alarms = Object.values(template.findResources('AWS::CloudWatch::Alarm'));
+    const alarms = readAlarmResources(template);
     for (const alarm of alarms) {
       expect(alarm.Properties.AlarmActions).toHaveLength(1);
     }
